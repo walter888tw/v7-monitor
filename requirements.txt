@@ -1,0 +1,16 @@
+# V7 即時監控系統 - 依賴套件
+# Public App 版本
+
+# 基礎依賴
+streamlit>=1.29.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# V7 特定依賴
+ta>=0.11.0  # 技術指標庫（KD 計算）
+
+# 認證
+PyJWT>=2.8.0
+
