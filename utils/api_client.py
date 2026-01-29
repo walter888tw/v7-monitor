@@ -240,44 +240,82 @@ class APIClient:
         return None
 
     # ==================== V7 即時監控 API ====================
-    
-    def get_v7_signals_today(self) -> Optional[list]:
-        """獲取今日 V7 全局訊號記錄"""
+
+    def analyze_v7(self, analysis_date: str, analysis_time: str) -> Optional[Dict[str, Any]]:
+        """執行 V7 雙策略分析
+
+        Args:
+            analysis_date: 分析日期 (YYYY-MM-DD)
+            analysis_time: 分析時間 (HH:MM)
+
+        Returns:
+            分析結果字典（包含 success, original, optimized, market_data），
+            如果失敗則返回 None
+        """
         try:
-            response = self.get('/v7/signals/today')
-            print(f"[DEBUG] V7 signals API status: {response.status_code}")
+            response = self._request(
+                'POST',
+                '/v7/analyze',
+                data={
+                    'analysis_date': analysis_date,
+                    'analysis_time': analysis_time
+                },
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            elif response.status_code == 400:
+                try:
+                    error = response.json().get('detail', '請求參數錯誤')
+                except Exception:
+                    error = f'HTTP {response.status_code}'
+                st.warning(f"⚠️ {error}")
+            elif response.status_code == 422:
+                st.warning("⚠️ 分析參數格式錯誤，請確認日期和時間格式")
+            else:
+                try:
+                    error = response.json().get('detail', f'HTTP {response.status_code}')
+                except Exception:
+                    error = f'HTTP {response.status_code}'
+                st.error(f"❌ 分析失敗：{error}")
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                Exception):
+            # _request() 已經顯示了錯誤訊息，這裡只需靜默返回 None
+            pass
+        return None
+
+    def get_v7_signals_today(self) -> Optional[list]:
+        """獲取今日 V7 全局訊號記錄
+
+        Returns:
+            訊號列表，如果失敗則返回空列表
+        """
+        try:
+            response = self._request('GET', '/v7/signals/today')
 
             if response.status_code == 200:
                 data = response.json()
-                print(f"[DEBUG] V7 signals response type: {type(data)}")
-                print(f"[DEBUG] V7 signals response: {data}")
 
                 # 後端返回格式：{"success": true, "count": 2, "signals": [...]}
-                # 只返回 signals 列表
                 if isinstance(data, dict) and 'signals' in data:
-                    signals = data['signals']
-                    print(f"[DEBUG] Extracted signals: {signals}")
-                    return signals
+                    return data['signals']
                 elif isinstance(data, list):
-                    # 如果直接返回列表
                     return data
                 else:
-                    print(f"[DEBUG] Unexpected response format: {type(data)}")
                     return []
             else:
-                print(f"[DEBUG] V7 signals API error: {response.status_code} - {response.text}")
                 return []
-        except Exception as e:
-            print(f"獲取 V7 訊號失敗：{str(e)}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            pass
         return []
-    
+
     def save_v7_signal(self, signal_data: Dict) -> bool:
         """儲存 V7 訊號記錄"""
         try:
             response = self.post('/v7/signals', data=signal_data)
             return response.status_code == 201
-        except:
+        except Exception:
             return False
 

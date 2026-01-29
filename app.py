@@ -511,66 +511,33 @@ def v7_monitor_page():
     analysis_time = now.strftime('%H:%M')
 
     # 調用後端 API 獲取策略分析
-    try:
-        with st.spinner("🔄 正在分析策略..."):
-            response = api_client.post('/v7/analyze', data={
-                'analysis_date': analysis_date,
-                'analysis_time': analysis_time
-            })
+    with st.spinner("🔄 正在分析策略..."):
+        result = api_client.analyze_v7(analysis_date, analysis_time)
 
-            # 檢查 HTTP 狀態碼
-            if response.status_code == 200:
-                result = response.json()
+    if result and result.get('success'):
+        # 渲染雙策略狀態
+        render_dual_strategy_status(result, st.session_state.prev_scores)
 
-                if result and result.get('success'):
-                    # 渲染雙策略狀態
-                    render_dual_strategy_status(result, st.session_state.prev_scores)
+        # 更新分數記錄
+        st.session_state.prev_scores = {
+            'original': result.get('original', {}).get('score', 0),
+            'optimized': result.get('optimized', {}).get('score', 0)
+        }
 
-                    # 更新分數記錄
-                    st.session_state.prev_scores = {
-                        'original': result.get('original', {}).get('score', 0),
-                        'optimized': result.get('optimized', {}).get('score', 0)
-                    }
+        st.markdown("---")
 
-                    st.markdown("---")
+        # 渲染市場數據
+        if 'market_data' in result:
+            render_market_data(result['market_data'])
+    else:
+        if result is not None:
+            st.error(f"❌ 分析失敗：{result.get('error', '未知錯誤')}")
+        # result is None 時，analyze_v7() 已經顯示了具體錯誤訊息
 
-                    # 渲染市場數據
-                    if 'market_data' in result:
-                        render_market_data(result['market_data'])
+    st.markdown("---")
 
-                    st.markdown("---")
-
-                    # 渲染訊號歷史
-                    render_signal_history()
-                else:
-                    st.error(f"❌ 分析失敗：{result.get('error', '未知錯誤')}")
-            elif response.status_code == 422:
-                # Pydantic 驗證錯誤 - 提供更友善的錯誤訊息
-                try:
-                    error_data = response.json()
-                    error_detail = error_data.get('detail', [])
-                    if isinstance(error_detail, list):
-                        missing_fields = [e.get('loc', ['', ''])[-1] for e in error_detail if e.get('type') == 'missing']
-                        if missing_fields:
-                            error_msg = f"缺少必要參數：{', '.join(missing_fields)}"
-                        else:
-                            error_msg = "請求參數驗證失敗"
-                    else:
-                        error_msg = str(error_detail)
-                except:
-                    error_msg = "請求參數驗證失敗"
-                st.error(f"❌ 分析失敗：{error_msg}")
-            else:
-                # 處理其他 HTTP 錯誤
-                try:
-                    error_data = response.json()
-                    error_msg = error_data.get('detail', '未知錯誤')
-                except:
-                    error_msg = f"HTTP {response.status_code}"
-                st.error(f"❌ 分析失敗：{error_msg}")
-
-    except Exception as e:
-        st.error(f"❌ 系統錯誤：{str(e)}")
+    # 訊號歷史（無論分析是否成功都顯示）
+    render_signal_history()
 
     st.markdown("---")
 
