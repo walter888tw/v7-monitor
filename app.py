@@ -454,6 +454,11 @@ def render_vix_chart():
     st.subheader("📊 台指 VIX 波動率指數")
 
     try:
+        # 防禦性檢查：確保 API 客戶端方法存在（Streamlit Cloud 快取可能導致缺失）
+        if not hasattr(api_client, 'get_vix_today'):
+            st.info("📭 VIX 功能正在部署中，請重新整理頁面")
+            return
+
         vix_data = api_client.get_vix_today()
 
         if vix_data and vix_data.get('success'):
