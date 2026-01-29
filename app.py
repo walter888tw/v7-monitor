@@ -242,7 +242,7 @@ def is_signal_window(now: datetime) -> bool:
     return SIGNAL_WINDOW_START <= current_time <= SIGNAL_WINDOW_END
 
 def get_trading_progress(now: datetime) -> float:
-    """計算交易時段進度百分比"""
+    """計算交易時段進度百分比（返回 0.0 到 1.0）"""
     if not is_trading_hours(now):
         return 0.0
 
@@ -250,6 +250,17 @@ def get_trading_progress(now: datetime) -> float:
     start_seconds = TRADING_START.hour * 3600 + TRADING_START.minute * 60
     end_seconds = TRADING_END.hour * 3600 + TRADING_END.minute * 60
     current_seconds = current_time.hour * 3600 + current_time.minute * 60
+
+    # 計算進度（0.0 到 1.0）
+    total_seconds = end_seconds - start_seconds
+    elapsed_seconds = current_seconds - start_seconds
+
+    if total_seconds <= 0:
+        return 0.0
+
+    progress = elapsed_seconds / total_seconds
+    # 確保進度在 0.0 到 1.0 之間
+    return max(0.0, min(1.0, progress))
 
 
 # ==================== UI 渲染函數 ====================
@@ -264,6 +275,11 @@ def render_countdown_timer(seconds_until_refresh: int):
 def render_timeline(now: datetime):
     """渲染交易時段時間軸"""
     progress = get_trading_progress(now)
+
+    # 防禦性檢查：確保 progress 是有效的數字
+    if progress is None or not isinstance(progress, (int, float)):
+        progress = 0.0
+
     progress_pct = progress * 100
 
     st.markdown(f"""
