@@ -395,15 +395,35 @@ def render_market_data(market_data: Dict):
         st.metric("距MA5", f"{market_data.get('price_vs_ma5', 0):.0f}")
 
 def render_signal_history():
-    """渲染訊號歷史記錄"""
+    """渲染訊號歷史記錄（全局訊號）"""
     st.subheader("📜 今日訊號歷史")
+    st.caption("📡 全市場訊號 — 所有用戶看到相同內容")
 
     try:
-        # 從後端 API 獲取今日訊號記錄
-        signals = api_client.get_v7_signals_today()
+        # 從後端 API 獲取今日全局訊號記錄
+        response = api_client.get_v7_signals_today()
+
+        # 處理不同的響應格式
+        signals = []
+        if response:
+            # 如果響應是字典且包含 'signals' 鍵（API client 應該已經提取了）
+            if isinstance(response, dict) and 'signals' in response:
+                signals = response['signals']
+            # 如果響應直接是列表（正常情況）
+            elif isinstance(response, list):
+                signals = response
+            # 其他情況
+            else:
+                st.warning(f"未預期的響應格式: {type(response)}")
+                signals = []
 
         if signals and len(signals) > 0:
             for signal in signals:
+                # 確保 signal 是字典
+                if not isinstance(signal, dict):
+                    st.warning(f"訊號格式錯誤: {type(signal)}")
+                    continue
+
                 col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
 
                 with col1:
@@ -426,6 +446,8 @@ def render_signal_history():
 
     except Exception as e:
         st.error(f"載入訊號歷史失敗：{str(e)}")
+        import traceback
+        st.code(traceback.format_exc())
 
 # ==================== V7 監控頁面 ====================
 def v7_monitor_page():
