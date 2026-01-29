@@ -8,6 +8,7 @@ V7 即時監控系統 - Public App 版本
 import streamlit as st
 import os
 import sys
+import requests
 from pathlib import Path
 from datetime import datetime, time, timedelta
 import time as pytime
@@ -17,7 +18,7 @@ from typing import Optional, Dict
 sys.path.insert(0, str(Path(__file__).parent))
 
 # 導入認證和 API 客戶端
-from utils.auth import require_auth, render_user_info_sidebar
+from utils.auth import init_session, is_authenticated, render_user_info_sidebar
 from utils.api_client import APIClient
 
 # API 基礎 URL（從 Streamlit Secrets 讀取）
@@ -38,8 +39,112 @@ st.markdown("""
 <meta name="robots" content="noindex, nofollow">
 """, unsafe_allow_html=True)
 
-# ==================== 認證檢查 ====================
-require_auth()
+# ==================== 登入/註冊頁面 ====================
+def auth_page():
+    """登入/註冊頁面"""
+    st.title("📡 V7 即時監控系統")
+    st.markdown("### 台指期貨選擇權策略即時監控")
+
+    tab1, tab2 = st.tabs(["🔑 登入", "📝 註冊"])
+
+    with tab1:
+        st.markdown("#### 用戶登入")
+
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input("密碼", type="password", key="login_password")
+
+        if st.button("登入", use_container_width=True):
+            if not email or not password:
+                st.error("❌ 請填寫所有欄位")
+                return
+
+            try:
+                response = requests.post(
+                    f"{API_BASE_URL}/auth/login",
+                    json={"email": email, "password": password}
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    st.session_state.user_token = data["access_token"]
+                    st.session_state.refresh_token = data["refresh_token"]
+                    st.session_state.user_email = email
+                    st.success("✅ 登入成功！")
+                    st.rerun()
+                else:
+                    error = response.json().get("detail", "登入失敗")
+                    st.error(f"❌ {error}")
+            except Exception as e:
+                st.error(f"❌ 連接失敗：{str(e)}")
+
+    with tab2:
+        st.markdown("#### 新用戶註冊")
+
+        reg_email = st.text_input("Email", key="reg_email")
+        reg_username = st.text_input("用戶名", key="reg_username")
+        reg_password = st.text_input("密碼（至少8位，包含字母和數字）", type="password", key="reg_password")
+        reg_password2 = st.text_input("確認密碼", type="password", key="reg_password2")
+        invite_code = st.text_input("邀請碼", key="invite_code")
+
+        st.info("💡 請向管理員索取邀請碼")
+
+        if st.button("註冊", use_container_width=True):
+            # 驗證
+            if not all([reg_email, reg_username, reg_password, invite_code]):
+                st.error("❌ 請填寫所有欄位")
+                return
+
+            if reg_password != reg_password2:
+                st.error("❌ 兩次密碼不一致")
+                return
+
+            if len(reg_password) < 8:
+                st.error("❌ 密碼至少8位")
+                return
+
+            try:
+                response = requests.post(
+                    f"{API_BASE_URL}/auth/register",
+                    json={
+                        "email": reg_email,
+                        "username": reg_username,
+                        "password": reg_password,
+                        "invite_code": invite_code
+                    }
+                )
+
+                if response.status_code == 201:
+                    st.success("✅ 註冊成功！請使用Email和密碼登入")
+                else:
+                    error = response.json().get("detail", "註冊失敗")
+                    st.error(f"❌ {error}")
+            except Exception as e:
+                st.error(f"❌ 連接失敗：{str(e)}")
+
+    st.markdown("---")
+    st.markdown("""
+    ### 📚 系統說明
+
+    **V7 即時監控系統** 提供雙策略即時監控：
+
+    #### 🎯 核心功能
+    - 📊 雙策略監控（原始 V7 + Phase3 優化）
+    - ⏱️ 30 秒自動刷新（交易時段）
+    - 📈 8 個市場指標即時監控
+    - 🎯 訊號窗口：09:00-09:30
+    - 📜 今日訊號歷史記錄
+
+    #### 📊 策略特色
+    - **原始 V7 策略**：40 個歷史樣本，72.5% 勝率
+    - **Phase3 優化策略**：23 個歷史樣本，87% 勝率
+
+    #### 🎓 教育免責聲明
+    ⚠️ **本系統僅供教育研究用途**
+    - 所有策略基於歷史數據回測，不代表未來表現
+    - 期貨交易存在高度風險，可能導致本金全部損失
+    - 使用者應自行評估風險，本系統不提供投資建議
+    - 任何交易決策由使用者自行負責
+    """)
 
 # ==================== 初始化 API 客戶端 ====================
 api_client = APIClient(API_BASE_URL)
@@ -306,9 +411,9 @@ def render_signal_history():
     except Exception as e:
         st.error(f"載入訊號歷史失敗：{str(e)}")
 
-# ==================== 主函數 ====================
-def main():
-    """主程式"""
+# ==================== V7 監控頁面 ====================
+def v7_monitor_page():
+    """V7 即時監控主頁面（需要認證）"""
     # 標題
     st.title("📡 V7 即時監控系統")
 
@@ -404,6 +509,17 @@ def main():
 
     # 風險提示
     st.caption("⚠️ 本系統僅供教育和研究用途，不構成投資建議。投資有風險，請謹慎決策。")
+
+# ==================== 主程式 ====================
+def main():
+    """主程式入口"""
+    init_session()
+
+    # 檢查登入狀態
+    if not is_authenticated():
+        auth_page()
+    else:
+        v7_monitor_page()
 
 # ==================== 主程式入口 ====================
 if __name__ == "__main__":
