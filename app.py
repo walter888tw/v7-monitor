@@ -487,30 +487,42 @@ def v7_monitor_page():
     # 調用後端 API 獲取策略分析
     try:
         with st.spinner("🔄 正在分析策略..."):
-            result = api_client.post('/v7/analyze', data={})
+            response = api_client.post('/v7/analyze', data={})
 
-            if result and result.get('success'):
-                # 渲染雙策略狀態
-                render_dual_strategy_status(result, st.session_state.prev_scores)
+            # 檢查 HTTP 狀態碼
+            if response.status_code == 200:
+                result = response.json()
 
-                # 更新分數記錄
-                st.session_state.prev_scores = {
-                    'original': result.get('original', {}).get('score', 0),
-                    'optimized': result.get('optimized', {}).get('score', 0)
-                }
+                if result and result.get('success'):
+                    # 渲染雙策略狀態
+                    render_dual_strategy_status(result, st.session_state.prev_scores)
 
-                st.markdown("---")
+                    # 更新分數記錄
+                    st.session_state.prev_scores = {
+                        'original': result.get('original', {}).get('score', 0),
+                        'optimized': result.get('optimized', {}).get('score', 0)
+                    }
 
-                # 渲染市場數據
-                if 'market_data' in result:
-                    render_market_data(result['market_data'])
+                    st.markdown("---")
 
-                st.markdown("---")
+                    # 渲染市場數據
+                    if 'market_data' in result:
+                        render_market_data(result['market_data'])
 
-                # 渲染訊號歷史
-                render_signal_history()
+                    st.markdown("---")
+
+                    # 渲染訊號歷史
+                    render_signal_history()
+                else:
+                    st.error(f"❌ 分析失敗：{result.get('error', '未知錯誤')}")
             else:
-                st.error(f"❌ 分析失敗：{result.get('error', '未知錯誤')}")
+                # 處理 HTTP 錯誤
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('detail', '未知錯誤')
+                except:
+                    error_msg = f"HTTP {response.status_code}"
+                st.error(f"❌ 分析失敗：{error_msg}")
 
     except Exception as e:
         st.error(f"❌ 系統錯誤：{str(e)}")
