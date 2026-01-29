@@ -484,10 +484,17 @@ def v7_monitor_page():
 
     st.markdown("---")
 
+    # 準備 API 請求參數（使用當前台灣時間）
+    analysis_date = now.strftime('%Y-%m-%d')
+    analysis_time = now.strftime('%H:%M')
+
     # 調用後端 API 獲取策略分析
     try:
         with st.spinner("🔄 正在分析策略..."):
-            response = api_client.post('/v7/analyze', data={})
+            response = api_client.post('/v7/analyze', data={
+                'analysis_date': analysis_date,
+                'analysis_time': analysis_time
+            })
 
             # 檢查 HTTP 狀態碼
             if response.status_code == 200:
@@ -515,8 +522,24 @@ def v7_monitor_page():
                     render_signal_history()
                 else:
                     st.error(f"❌ 分析失敗：{result.get('error', '未知錯誤')}")
+            elif response.status_code == 422:
+                # Pydantic 驗證錯誤 - 提供更友善的錯誤訊息
+                try:
+                    error_data = response.json()
+                    error_detail = error_data.get('detail', [])
+                    if isinstance(error_detail, list):
+                        missing_fields = [e.get('loc', ['', ''])[-1] for e in error_detail if e.get('type') == 'missing']
+                        if missing_fields:
+                            error_msg = f"缺少必要參數：{', '.join(missing_fields)}"
+                        else:
+                            error_msg = "請求參數驗證失敗"
+                    else:
+                        error_msg = str(error_detail)
+                except:
+                    error_msg = "請求參數驗證失敗"
+                st.error(f"❌ 分析失敗：{error_msg}")
             else:
-                # 處理 HTTP 錯誤
+                # 處理其他 HTTP 錯誤
                 try:
                     error_data = response.json()
                     error_msg = error_data.get('detail', '未知錯誤')
