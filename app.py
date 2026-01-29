@@ -449,6 +449,68 @@ def render_signal_history():
         import traceback
         st.code(traceback.format_exc())
 
+def render_vix_chart():
+    """渲染台指 VIX 波動率指數圖表區塊"""
+    st.subheader("📊 台指 VIX 波動率指數")
+
+    try:
+        vix_data = api_client.get_vix_today()
+
+        if vix_data and vix_data.get('success'):
+            latest = vix_data.get('latest')
+            data_points = vix_data.get('data', [])
+
+            # 顯示最新 VIX 值和日內統計
+            if latest:
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    change = latest.get('change', 0)
+                    change_pct = latest.get('change_pct', 0)
+                    st.metric(
+                        "VIX 當前值",
+                        f"{latest['vix_value']:.2f}",
+                        delta=f"{change:+.2f} ({change_pct:+.1f}%)"
+                    )
+                with col2:
+                    st.metric("開盤", f"{latest.get('open', 0):.2f}")
+                with col3:
+                    st.metric("日內高", f"{latest.get('high', 0):.2f}")
+                with col4:
+                    st.metric("日內低", f"{latest.get('low', 0):.2f}")
+
+                # VIX 等級判斷
+                vix_val = latest['vix_value']
+                if vix_val < 15:
+                    st.success(f"🟢 低波動（VIX {vix_val:.2f}）— 市場平靜")
+                elif vix_val < 20:
+                    st.info(f"🔵 正常波動（VIX {vix_val:.2f}）— 市場穩定")
+                elif vix_val < 25:
+                    st.warning(f"🟡 中等波動（VIX {vix_val:.2f}）— 需要關注")
+                elif vix_val < 30:
+                    st.warning(f"🟠 高波動（VIX {vix_val:.2f}）— 市場緊張")
+                else:
+                    st.error(f"🔴 極高波動（VIX {vix_val:.2f}）— 市場恐慌")
+
+            # 繪製日內走勢圖
+            if data_points and len(data_points) > 1:
+                import pandas as pd
+                df = pd.DataFrame(data_points)
+                df['time_label'] = df['time']
+                df = df.set_index('time_label')
+
+                st.line_chart(df[['vix_value']], use_container_width=True)
+                st.caption(f"今日 VIX 數據點: {len(data_points)} 筆 | 更新時間: {latest.get('time', '') if latest else ''}")
+            elif latest:
+                st.info(f"📌 目前僅有 1 筆數據（VIX: {latest['vix_value']:.2f}），圖表將在累積更多數據後顯示")
+            else:
+                st.info("📭 今日尚無 VIX 數據（非交易時段或數據尚未收集）")
+        else:
+            st.info("📭 VIX 數據暫時無法取得（服務初始化中或非交易時段）")
+
+    except Exception as e:
+        st.warning(f"VIX 數據載入失敗: {str(e)}")
+
+
 # ==================== V7 監控頁面 ====================
 def v7_monitor_page():
     """V7 即時監控主頁面（需要認證）"""
@@ -503,6 +565,11 @@ def v7_monitor_page():
         if st.button("🔄 立即刷新", type="primary", use_container_width=True):
             st.session_state.last_refresh = now
             st.rerun()
+
+    st.markdown("---")
+
+    # VIX 波動率指數圖表（在雙策略監控區塊上方）
+    render_vix_chart()
 
     st.markdown("---")
 

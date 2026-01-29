@@ -319,3 +319,40 @@ class APIClient:
         except Exception:
             return False
 
+    # ==================== VIX 數據 API ====================
+
+    def get_vix_today(self) -> Optional[Dict[str, Any]]:
+        """獲取今日 VIX 分鐘級數據
+
+        Returns:
+            包含 success, count, latest, data 的字典，失敗返回 None
+        """
+        try:
+            response = self._request('GET', '/vix/today', timeout=15)
+            if response.status_code == 200:
+                return response.json()
+        except Exception:
+            pass
+        return None
+
+    def get_vix_history(self, days: int = 30) -> Optional[Dict[str, Any]]:
+        """獲取歷史日線 VIX 數據
+
+        Args:
+            days: 查詢天數
+
+        Returns:
+            包含 success, count, data 的字典，失敗返回 None
+        """
+        try:
+            response = self._request(
+                'GET', '/vix/history',
+                params={'days': days},
+                timeout=15
+            )
+            if response.status_code == 200:
+                return response.json()
+        except Exception:
+            pass
+        return None
+
