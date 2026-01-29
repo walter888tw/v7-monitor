@@ -242,13 +242,35 @@ class APIClient:
     # ==================== V7 即時監控 API ====================
     
     def get_v7_signals_today(self) -> Optional[list]:
-        """獲取今日 V7 訊號記錄"""
+        """獲取今日 V7 全局訊號記錄"""
         try:
             response = self.get('/v7/signals/today')
+            print(f"[DEBUG] V7 signals API status: {response.status_code}")
+
             if response.status_code == 200:
-                return response.json()
-        except:
-            pass
+                data = response.json()
+                print(f"[DEBUG] V7 signals response type: {type(data)}")
+                print(f"[DEBUG] V7 signals response: {data}")
+
+                # 後端返回格式：{"success": true, "count": 2, "signals": [...]}
+                # 只返回 signals 列表
+                if isinstance(data, dict) and 'signals' in data:
+                    signals = data['signals']
+                    print(f"[DEBUG] Extracted signals: {signals}")
+                    return signals
+                elif isinstance(data, list):
+                    # 如果直接返回列表
+                    return data
+                else:
+                    print(f"[DEBUG] Unexpected response format: {type(data)}")
+                    return []
+            else:
+                print(f"[DEBUG] V7 signals API error: {response.status_code} - {response.text}")
+                return []
+        except Exception as e:
+            print(f"獲取 V7 訊號失敗：{str(e)}")
+            import traceback
+            traceback.print_exc()
         return []
     
     def save_v7_signal(self, signal_data: Dict) -> bool:
