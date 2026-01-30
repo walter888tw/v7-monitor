@@ -339,6 +339,9 @@ def render_timeline(now: datetime):
 
 def render_dual_strategy_status(result: Dict, prev_scores: Dict):
     """渲染雙策略狀態"""
+    # 取得分析時間（顯示於訊號盒中，避免用戶誤判訊號時效性）
+    analysis_time_str = result.get('analysis_time', '')
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -359,6 +362,7 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <p>分數: {score} {change_icon} ({score_change:+d})</p>
                 <p>勝率: {original.get('win_rate', 0):.1%}</p>
                 <p>樣本: {original.get('samples', 0)} 筆</p>
+                <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
             </div>
             """, unsafe_allow_html=True)
         else:
@@ -366,6 +370,7 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
             <div class="signal-box signal-none">
                 <h2>⚪ 無訊號</h2>
                 <p>分數: {score} {change_icon} ({score_change:+d})</p>
+                <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -393,6 +398,7 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <p>分數: {score} {change_icon} ({score_change:+d})</p>
                 <p>勝率: {optimized.get('win_rate', 0):.1%}</p>
                 <p>樣本: {optimized.get('samples', 0)} 筆</p>
+                <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
             </div>
             """, unsafe_allow_html=True)
         else:
@@ -400,6 +406,7 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
             <div class="signal-box signal-none">
                 <h2>⚪ 無訊號</h2>
                 <p>分數: {score} {change_icon} ({score_change:+d})</p>
+                <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -417,11 +424,17 @@ def render_intraday_status(result: Dict, prev_scores: Dict):
 
     st.subheader("🟡 盤中動態引擎（第三引擎）")
 
+    # 取得分析時間
+    analysis_time_str = result.get('analysis_time', '')
+
     has_signal = intraday.get('has_signal', False)
     best_score = intraday.get('best_score', 0)
     best_direction = intraday.get('best_direction')
     best_entry_time = intraday.get('best_entry_time')
     signals = intraday.get('signals', [])
+
+    # 統計所有匹配的訊號數量
+    matched_count = sum(1 for s in signals if s.get('matched') and s.get('direction'))
 
     # 計算分數變化
     score_change = best_score - prev_scores.get('intraday', 0)
@@ -431,10 +444,12 @@ def render_intraday_status(result: Dict, prev_scores: Dict):
     if has_signal and best_direction:
         css_class = f"signal-intraday-{'call' if best_direction == 'CALL' else 'put'}"
         dir_icon = '🟢 CALL' if best_direction == 'CALL' else '🔴 PUT'
+        matched_info = f" | 共 {matched_count} 個窗口匹配" if matched_count > 1 else ""
         st.markdown(f"""
         <div class="signal-box {css_class}">
             <h2>🟡 盤中動態 — {dir_icon}</h2>
-            <p>最佳進場時間: {best_entry_time} | 分數: {best_score} {change_icon} ({score_change:+d})</p>
+            <p>最佳進場時間: {best_entry_time} | 分數: {best_score} {change_icon} ({score_change:+d}){matched_info}</p>
+            <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -442,6 +457,7 @@ def render_intraday_status(result: Dict, prev_scores: Dict):
         <div class="signal-box signal-intraday-none">
             <h2>⚪ 盤中無訊號</h2>
             <p>最高分數: {best_score} {change_icon} ({score_change:+d})</p>
+            <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
         </div>
         """, unsafe_allow_html=True)
 
