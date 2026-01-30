@@ -491,9 +491,9 @@ def render_market_data(market_data: Dict):
     with col2:
         st.metric("VWAP", f"{market_data.get('vwap', 0):.0f}")
     with col3:
-        st.metric("MA20", f"{market_data.get('ma20', 0):.0f}")
+        st.metric("日線 MA20", f"{market_data.get('ma20', 0):.0f}")
     with col4:
-        st.metric("MA5", f"{market_data.get('ma5', 0):.0f}")
+        st.metric("日線 MA5", f"{market_data.get('ma5', 0):.0f}")
 
     col5, col6, col7, col8 = st.columns(4)
 
