@@ -22,8 +22,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils.auth import init_session, is_authenticated, render_user_info_sidebar
 from utils.api_client import APIClient
 
-# API 基礎 URL（從 Streamlit Secrets 讀取）
-API_BASE_URL = st.secrets.get("API_BASE_URL", "http://localhost:8000/api/v1")
+# API 基礎 URL（從 Streamlit Secrets 讀取，無 secrets 時使用環境變數或預設值）
+try:
+    API_BASE_URL = st.secrets.get("API_BASE_URL", "http://localhost:8000/api/v1")
+except Exception:
+    API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000/api/v1")
 if not API_BASE_URL.endswith('/api/v1'):
     API_BASE_URL = API_BASE_URL + '/api/v1'
 
