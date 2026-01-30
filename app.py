@@ -6,6 +6,7 @@ V7 即時監控系統 - Public App 版本
 本應用為 Public App，但所有功能都需要 JWT 認證保護
 """
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import sys
 import requests
@@ -13,6 +14,8 @@ from pathlib import Path
 from datetime import datetime, time, timedelta
 import time as pytime
 from typing import Optional, Dict
+from streamlit_autorefresh import st_autorefresh
+import plotly.graph_objects as go
 
 # 添加 utils 到路徑
 sys.path.insert(0, str(Path(__file__).parent))
@@ -125,18 +128,19 @@ def auth_page():
     st.markdown("""
     ### 📚 系統說明
 
-    **V7 即時監控系統** 提供雙策略即時監控：
+    **V7 即時監控系統** 提供三策略即時監控：
 
     #### 🎯 核心功能
-    - 📊 雙策略監控（原始 V7 + Phase3 優化）
-    - ⏱️ 30 秒自動刷新（交易時段）
+    - 📊 三策略監控（原始 V7 + Phase3 優化 + 盤中動態）
+    - ⏱️ 15 秒自動刷新（交易時段）
     - 📈 8 個市場指標即時監控
-    - 🎯 訊號窗口：09:00-09:30
+    - 🎯 訊號窗口：09:00-09:30（原始/優化）+ 09:00-13:25（盤中動態）
     - 📜 今日訊號歷史記錄
 
     #### 📊 策略特色
     - **原始 V7 策略**：40 個歷史樣本，72.5% 勝率
     - **Phase3 優化策略**：23 個歷史樣本，87% 勝率
+    - **盤中動態策略**：31 個歷史樣本，96.8% 勝率（第三引擎）
 
     #### 🎓 教育免責聲明
     ⚠️ **本系統僅供教育研究用途**
@@ -150,9 +154,11 @@ def auth_page():
 api_client = APIClient(API_BASE_URL)
 
 # ==================== 常數定義 ====================
-REFRESH_INTERVAL = 30  # 秒
+REFRESH_INTERVAL = 15  # 秒（與 VIX 數據更新頻率同步）
 SIGNAL_WINDOW_START = time(9, 0)
 SIGNAL_WINDOW_END = time(9, 30)
+INTRADAY_WINDOW_START = time(9, 0)
+INTRADAY_WINDOW_END = time(13, 25)
 TRADING_START = time(8, 45)
 TRADING_END = time(13, 45)
 
@@ -177,6 +183,26 @@ st.markdown("""
 .signal-none {
     background: linear-gradient(135deg, #e0e0e0 0%, #bdbdbd 100%);
     color: #666;
+}
+.signal-intraday-call {
+    background: linear-gradient(135deg, #f6d365 0%, #fda085 100%);
+    color: #333;
+}
+.signal-intraday-put {
+    background: linear-gradient(135deg, #fbc2eb 0%, #f6d365 100%);
+    color: #333;
+}
+.signal-intraday-none {
+    background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);
+    color: #999;
+}
+.intraday-detail {
+    padding: 8px 12px;
+    border-radius: 8px;
+    margin: 4px 0;
+    background: rgba(246, 211, 101, 0.1);
+    border-left: 3px solid #f6d365;
+    font-size: 14px;
 }
 
 /* 倒數計時器樣式 */
@@ -220,7 +246,7 @@ st.markdown("""
 if 'last_refresh' not in st.session_state:
     st.session_state.last_refresh = datetime.now()
 if 'prev_scores' not in st.session_state:
-    st.session_state.prev_scores = {'original': 0, 'optimized': 0}
+    st.session_state.prev_scores = {'original': 0, 'optimized': 0, 'intraday': 0}
 if 'signal_history' not in st.session_state:
     st.session_state.signal_history = []
 if 'auto_refresh_enabled' not in st.session_state:
@@ -240,6 +266,11 @@ def is_signal_window(now: datetime) -> bool:
     """檢查是否在訊號窗口"""
     current_time = now.time()
     return SIGNAL_WINDOW_START <= current_time <= SIGNAL_WINDOW_END
+
+def is_intraday_signal_window(now: datetime) -> bool:
+    """檢查是否在盤中動態訊號窗口"""
+    current_time = now.time()
+    return INTRADAY_WINDOW_START <= current_time <= INTRADAY_WINDOW_END
 
 def get_trading_progress(now: datetime) -> float:
     """計算交易時段進度百分比（返回 0.0 到 1.0）"""
@@ -265,12 +296,36 @@ def get_trading_progress(now: datetime) -> float:
 
 # ==================== UI 渲染函數 ====================
 def render_countdown_timer(seconds_until_refresh: int):
-    """渲染倒數計時器"""
-    st.markdown(f"""
-    <div class="countdown-timer">
-        ⏱️ 下次更新: {seconds_until_refresh} 秒
+    """渲染倒數計時器（JavaScript 動態倒數）"""
+    components.html(f"""
+    <div style="
+        background: #1e1e1e;
+        border: 2px solid #ff6b6b;
+        border-radius: 10px;
+        padding: 15px;
+        text-align: center;
+        color: #ff6b6b;
+        font-size: 24px;
+        font-weight: bold;
+        font-family: 'Segoe UI', sans-serif;
+    ">
+        ⏱️ 下次更新: <span id="countdown">{seconds_until_refresh}</span> 秒
     </div>
-    """, unsafe_allow_html=True)
+    <script>
+        var seconds = {seconds_until_refresh};
+        var el = document.getElementById('countdown');
+        var timer = setInterval(function() {{
+            seconds--;
+            if (seconds >= 0 && el) {{
+                el.textContent = seconds;
+            }}
+            if (seconds <= 0) {{
+                if (el) el.textContent = '更新中...';
+                clearInterval(timer);
+            }}
+        }}, 1000);
+    </script>
+    """, height=70)
 
 def render_timeline(now: datetime):
     """渲染交易時段時間軸"""
@@ -288,12 +343,14 @@ def render_timeline(now: datetime):
     </div>
     """, unsafe_allow_html=True)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.caption(f"開盤: {TRADING_START.strftime('%H:%M')}")
     with col2:
-        st.caption(f"訊號窗口: {SIGNAL_WINDOW_START.strftime('%H:%M')}-{SIGNAL_WINDOW_END.strftime('%H:%M')}")
+        st.caption(f"原始/優化: {SIGNAL_WINDOW_START.strftime('%H:%M')}-{SIGNAL_WINDOW_END.strftime('%H:%M')}")
     with col3:
+        st.caption(f"盤中動態: {INTRADAY_WINDOW_START.strftime('%H:%M')}-{INTRADAY_WINDOW_END.strftime('%H:%M')}")
+    with col4:
         st.caption(f"收盤: {TRADING_END.strftime('%H:%M')}")
 
 def render_dual_strategy_status(result: Dict, prev_scores: Dict):
@@ -368,6 +425,77 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                     for reason in optimized['unmatch_reasons']:
                         st.write(f"- {reason}")
 
+def render_intraday_status(result: Dict, prev_scores: Dict):
+    """渲染盤中動態引擎狀態"""
+    intraday = result.get('intraday')
+    if intraday is None:
+        return
+
+    st.subheader("🟡 盤中動態引擎（第三引擎）")
+
+    has_signal = intraday.get('has_signal', False)
+    best_score = intraday.get('best_score', 0)
+    best_direction = intraday.get('best_direction')
+    best_entry_time = intraday.get('best_entry_time')
+    signals = intraday.get('signals', [])
+
+    # 計算分數變化
+    score_change = best_score - prev_scores.get('intraday', 0)
+    change_icon = "↗️" if score_change > 0 else ("↘️" if score_change < 0 else "→")
+
+    # 最佳訊號摘要
+    if has_signal and best_direction:
+        css_class = f"signal-intraday-{'call' if best_direction == 'CALL' else 'put'}"
+        dir_icon = '🟢 CALL' if best_direction == 'CALL' else '🔴 PUT'
+        st.markdown(f"""
+        <div class="signal-box {css_class}">
+            <h2>🟡 盤中動態 — {dir_icon}</h2>
+            <p>最佳進場時間: {best_entry_time} | 分數: {best_score} {change_icon} ({score_change:+d})</p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div class="signal-box signal-intraday-none">
+            <h2>⚪ 盤中無訊號</h2>
+            <p>最高分數: {best_score} {change_icon} ({score_change:+d})</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 各時間窗口明細
+    if signals:
+        with st.expander(f"查看各時間窗口明細（{len(signals)} 個窗口）", expanded=has_signal):
+            for sig in signals:
+                entry_time = sig.get('entry_time', '')
+                matched = sig.get('matched', False)
+                direction = sig.get('direction')
+                score = sig.get('score', 0)
+                win_rate = sig.get('win_rate', 0)
+                samples = sig.get('samples', 0)
+                morning_range = sig.get('morning_range', 0)
+                vwap_distance = sig.get('vwap_distance', 0)
+                trend_points = sig.get('trend_points', 0)
+                reasons = sig.get('signal_reasons', [])
+
+                if matched and direction:
+                    dir_icon = '🟢' if direction == 'CALL' else '🔴'
+                    st.markdown(f"""
+                    <div class="intraday-detail">
+                        <strong>{entry_time}</strong> {dir_icon} {direction}
+                        — 分數: {score} | 勝率: {win_rate:.1%} | 樣本: {samples}
+                        <br>振幅: {morning_range:.0f}點 | VWAP距離: {vwap_distance:.0f}點 | 趨勢: {trend_points:+.0f}點
+                    </div>
+                    """, unsafe_allow_html=True)
+                    if reasons:
+                        st.caption(f"  訊號原因: {' / '.join(reasons)}")
+                else:
+                    st.markdown(f"""
+                    <div class="intraday-detail" style="opacity: 0.5;">
+                        <strong>{entry_time}</strong> ⚪ 未觸發 — 分數: {score}
+                        <br>振幅: {morning_range:.0f}點 | VWAP距離: {vwap_distance:.0f}點 | 趨勢: {trend_points:+.0f}點
+                    </div>
+                    """, unsafe_allow_html=True)
+
+
 def render_market_data(market_data: Dict):
     """渲染市場數據"""
     st.subheader("📈 市場數據")
@@ -430,7 +558,14 @@ def render_signal_history():
                     st.write(signal.get('signal_time', ''))
                 with col2:
                     strategy = signal.get('strategy_version', '')
-                    st.write("原始V7" if strategy == "ORIGINAL" else "優化策略")
+                    if strategy == "ORIGINAL":
+                        st.write("🔵 原始V7")
+                    elif strategy == "OPTIMIZED":
+                        st.write("🟢 優化策略")
+                    elif strategy == "INTRADAY":
+                        st.write("🟡 盤中動態")
+                    else:
+                        st.write(strategy)
                 with col3:
                     direction = signal.get('direction', '')
                     if direction == 'CALL':
@@ -450,7 +585,7 @@ def render_signal_history():
         st.code(traceback.format_exc())
 
 def render_vix_chart():
-    """渲染台指 VIX 波動率指數圖表區塊"""
+    """渲染台指 VIX 波動率指數圖表區塊（Plotly 互動圖表）"""
     st.subheader("📊 台指 VIX 波動率指數")
 
     try:
@@ -496,14 +631,110 @@ def render_vix_chart():
                 else:
                     st.error(f"🔴 極高波動（VIX {vix_val:.2f}）— 市場恐慌")
 
-            # 繪製日內走勢圖
+            # 繪製 Plotly 日內走勢圖
             if data_points and len(data_points) > 1:
                 import pandas as pd
                 df = pd.DataFrame(data_points)
-                df['time_label'] = df['time']
-                df = df.set_index('time_label')
 
-                st.line_chart(df[['vix_value']], use_container_width=True)
+                times = df['time'].tolist()
+                values = df['vix_value'].tolist()
+
+                # 找出高低點
+                max_val = max(values)
+                min_val = min(values)
+                max_idx = values.index(max_val)
+                min_idx = values.index(min_val)
+
+                fig = go.Figure()
+
+                # VIX 等級背景色帶
+                vix_levels = [
+                    (0, 15, 'rgba(76, 175, 80, 0.08)', '低波動'),
+                    (15, 20, 'rgba(33, 150, 243, 0.08)', '正常'),
+                    (20, 25, 'rgba(255, 235, 59, 0.10)', '中等'),
+                    (25, 30, 'rgba(255, 152, 0, 0.10)', '高波動'),
+                    (30, 50, 'rgba(244, 67, 54, 0.10)', '極高'),
+                ]
+                y_min_chart = max(0, min_val - 2)
+                y_max_chart = max_val + 2
+                for low, high, color, label in vix_levels:
+                    if high > y_min_chart and low < y_max_chart:
+                        fig.add_hrect(
+                            y0=max(low, y_min_chart), y1=min(high, y_max_chart),
+                            fillcolor=color, line_width=0,
+                            annotation_text=label if low >= y_min_chart else "",
+                            annotation_position="top left",
+                            annotation_font_size=10,
+                            annotation_font_color="rgba(150,150,150,0.7)",
+                        )
+
+                # 漸層面積 + 線條
+                fig.add_trace(go.Scatter(
+                    x=times, y=values,
+                    mode='lines',
+                    name='VIX',
+                    line=dict(color='#ff6b6b', width=2.5),
+                    fill='tozeroy',
+                    fillcolor='rgba(255, 107, 107, 0.15)',
+                    hovertemplate='時間: %{x}<br>VIX: %{y:.2f}<extra></extra>',
+                ))
+
+                # 當前值水平線
+                if latest:
+                    current_val = latest['vix_value']
+                    fig.add_hline(
+                        y=current_val,
+                        line_dash="dot",
+                        line_color="rgba(255, 107, 107, 0.5)",
+                        line_width=1,
+                        annotation_text=f"當前 {current_val:.2f}",
+                        annotation_position="top right",
+                        annotation_font_size=11,
+                        annotation_font_color="#ff6b6b",
+                    )
+
+                # 高點標記
+                fig.add_annotation(
+                    x=times[max_idx], y=max_val,
+                    text=f"高 {max_val:.2f}",
+                    showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.5,
+                    arrowcolor="#f44336",
+                    font=dict(size=11, color="#f44336"),
+                    ax=0, ay=-30,
+                )
+                # 低點標記
+                fig.add_annotation(
+                    x=times[min_idx], y=min_val,
+                    text=f"低 {min_val:.2f}",
+                    showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.5,
+                    arrowcolor="#4caf50",
+                    font=dict(size=11, color="#4caf50"),
+                    ax=0, ay=30,
+                )
+
+                # 佈局
+                fig.update_layout(
+                    height=350,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    xaxis=dict(
+                        title="",
+                        showgrid=True,
+                        gridcolor='rgba(128,128,128,0.1)',
+                        tickangle=-45,
+                    ),
+                    yaxis=dict(
+                        title="VIX",
+                        showgrid=True,
+                        gridcolor='rgba(128,128,128,0.1)',
+                        range=[y_min_chart, y_max_chart],
+                    ),
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    showlegend=False,
+                    hovermode='x unified',
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
                 st.caption(f"今日 VIX 數據點: {len(data_points)} 筆 | 更新時間: {latest.get('time', '') if latest else ''}")
             elif latest:
                 st.info(f"📌 目前僅有 1 筆數據（VIX: {latest['vix_value']:.2f}），圖表將在累積更多數據後顯示")
@@ -529,25 +760,36 @@ def v7_monitor_page():
     now = get_taiwan_now()
 
     # 顯示當前時間和交易狀態
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.info(f"🕐 當前時間: {now.strftime('%Y-%m-%d %H:%M:%S')}")
     with col2:
         if is_trading_hours(now):
             if is_signal_window(now):
-                st.success("✅ 訊號窗口開啟中")
+                st.success("✅ 原始/優化窗口開啟中")
             else:
                 st.info("📊 交易時段")
+        else:
+            st.warning("💤 非交易時段")
+    with col3:
+        if is_intraday_signal_window(now):
+            st.success("🟡 盤中動態窗口開啟中")
+        elif is_trading_hours(now):
+            st.info("⏳ 盤中動態窗口已結束")
         else:
             st.warning("💤 非交易時段")
 
     # 自動刷新開關
     auto_refresh = st.checkbox(
-        "啟用自動刷新（30秒）",
+        "啟用自動刷新（15秒）",
         value=st.session_state.auto_refresh_enabled,
         key="auto_refresh_toggle"
     )
     st.session_state.auto_refresh_enabled = auto_refresh
+
+    # 使用 streamlit-autorefresh 觸發定時 rerun
+    if auto_refresh and is_trading_hours(now):
+        st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="v7_refresh")
 
     st.markdown("---")
 
@@ -593,8 +835,14 @@ def v7_monitor_page():
         # 更新分數記錄
         st.session_state.prev_scores = {
             'original': result.get('original', {}).get('score', 0),
-            'optimized': result.get('optimized', {}).get('score', 0)
+            'optimized': result.get('optimized', {}).get('score', 0),
+            'intraday': result.get('intraday', {}).get('best_score', 0) if result.get('intraday') else 0,
         }
+
+        st.markdown("---")
+
+        # 渲染盤中動態引擎狀態
+        render_intraday_status(result, st.session_state.prev_scores)
 
         st.markdown("---")
 
@@ -613,11 +861,9 @@ def v7_monitor_page():
 
     st.markdown("---")
 
-    # 自動刷新邏輯
-    if auto_refresh and is_trading_hours(now) and seconds_until_refresh <= 0:
+    # 自動刷新由 st_autorefresh 觸發，每次 rerun 時更新時間戳
+    if auto_refresh and is_trading_hours(now):
         st.session_state.last_refresh = now
-        pytime.sleep(1)
-        st.rerun()
 
     # 風險提示
     st.caption("⚠️ 本系統僅供教育和研究用途，不構成投資建議。投資有風險，請謹慎決策。")

@@ -10,6 +10,8 @@ numpy>=1.24.0
 
 # V7 特定依賴
 ta>=0.11.0  # 技術指標庫（KD 計算）
+streamlit-autorefresh>=1.0.0  # 自動刷新元件
+plotly>=5.0.0  # 互動式圖表
 
 # 認證
 PyJWT>=2.8.0
