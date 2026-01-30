@@ -6,7 +6,6 @@ V7 即時監控系統 - Public App 版本
 本應用為 Public App，但所有功能都需要 JWT 認證保護
 """
 import streamlit as st
-import streamlit.components.v1 as components
 import os
 import sys
 import requests
@@ -14,7 +13,6 @@ from pathlib import Path
 from datetime import datetime, time, timedelta
 import time as pytime
 from typing import Optional, Dict
-from streamlit_autorefresh import st_autorefresh
 import plotly.graph_objects as go
 
 # 添加 utils 到路徑
@@ -295,37 +293,20 @@ def get_trading_progress(now: datetime) -> float:
 
 
 # ==================== UI 渲染函數 ====================
-def render_countdown_timer(seconds_until_refresh: int):
-    """渲染倒數計時器（JavaScript 動態倒數）"""
-    components.html(f"""
-    <div style="
-        background: #1e1e1e;
-        border: 2px solid #ff6b6b;
-        border-radius: 10px;
-        padding: 15px;
-        text-align: center;
-        color: #ff6b6b;
-        font-size: 24px;
-        font-weight: bold;
-        font-family: 'Segoe UI', sans-serif;
-    ">
-        ⏱️ 下次更新: <span id="countdown">{seconds_until_refresh}</span> 秒
-    </div>
-    <script>
-        var seconds = {seconds_until_refresh};
-        var el = document.getElementById('countdown');
-        var timer = setInterval(function() {{
-            seconds--;
-            if (seconds >= 0 && el) {{
-                el.textContent = seconds;
-            }}
-            if (seconds <= 0) {{
-                if (el) el.textContent = '更新中...';
-                clearInterval(timer);
-            }}
-        }}, 1000);
-    </script>
-    """, height=70)
+def render_countdown_update(placeholder, seconds: int):
+    """更新倒數計時器佔位符"""
+    if seconds > 0:
+        placeholder.markdown(f"""
+        <div class="countdown-timer">
+            ⏱️ 下次更新: {seconds} 秒
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        placeholder.markdown("""
+        <div class="countdown-timer">
+            ⏱️ 更新中...
+        </div>
+        """, unsafe_allow_html=True)
 
 def render_timeline(now: datetime):
     """渲染交易時段時間軸"""
@@ -787,22 +768,13 @@ def v7_monitor_page():
     )
     st.session_state.auto_refresh_enabled = auto_refresh
 
-    # 使用 streamlit-autorefresh 觸發定時 rerun
-    if auto_refresh and is_trading_hours(now):
-        st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="v7_refresh")
-
     st.markdown("---")
 
     # 渲染時間軸
     render_timeline(now)
 
-    # 計算距離下次刷新的時間
-    elapsed = (now - st.session_state.last_refresh).total_seconds()
-    seconds_until_refresh = max(0, int(REFRESH_INTERVAL - elapsed))
-
-    # 渲染倒數計時器
-    if auto_refresh and is_trading_hours(now):
-        render_countdown_timer(seconds_until_refresh)
+    # 倒數計時器佔位符（由底部循環即時更新）
+    countdown_placeholder = st.empty()
 
     st.markdown("---")
 
@@ -861,12 +833,17 @@ def v7_monitor_page():
 
     st.markdown("---")
 
-    # 自動刷新由 st_autorefresh 觸發，每次 rerun 時更新時間戳
-    if auto_refresh and is_trading_hours(now):
-        st.session_state.last_refresh = now
-
     # 風險提示
     st.caption("⚠️ 本系統僅供教育和研究用途，不構成投資建議。投資有風險，請謹慎決策。")
+
+    # 自動刷新倒數循環（放在所有內容渲染之後）
+    # 使用 st.empty() + sleep 逐秒更新倒數，到 0 時觸發 rerun
+    if auto_refresh and is_trading_hours(now):
+        for i in range(REFRESH_INTERVAL, 0, -1):
+            render_countdown_update(countdown_placeholder, i)
+            pytime.sleep(1)
+        render_countdown_update(countdown_placeholder, 0)
+        st.rerun()
 
 # ==================== 主程式 ====================
 def main():
