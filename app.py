@@ -496,6 +496,77 @@ def render_intraday_status(result: Dict, prev_scores: Dict):
                     """, unsafe_allow_html=True)
 
 
+def render_treasury_yield(market_data: Optional[Dict] = None):
+    """渲染美國 10 年期公債殖利率（獨立區塊，不依賴分析結果）"""
+    # 優先從分析結果的 market_data 取得
+    us10y = None
+    treasury_info = {}
+
+    if market_data:
+        us10y = market_data.get('us10y_yield')
+        if us10y is not None:
+            treasury_info = {
+                'change': market_data.get('us10y_change', 0),
+                'change_pct': market_data.get('us10y_change_pct', 0),
+                'source': market_data.get('us10y_source', 'N/A'),
+                'timestamp': market_data.get('us10y_timestamp', ''),
+            }
+
+    # 如果分析結果沒有，單獨呼叫 API
+    if us10y is None:
+        try:
+            treasury_data = api_client.get_treasury_yield()
+            if treasury_data and treasury_data.get('success'):
+                us10y = treasury_data.get('yield_pct')
+                treasury_info = {
+                    'change': treasury_data.get('change', 0),
+                    'change_pct': treasury_data.get('change_pct', 0),
+                    'source': treasury_data.get('source', 'N/A'),
+                    'timestamp': treasury_data.get('timestamp', ''),
+                }
+        except Exception:
+            pass
+
+    if us10y is None:
+        st.caption("🇺🇸 美債10Y 殖利率：暫無數據")
+        return
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        change = treasury_info.get('change', 0)
+        change_pct = treasury_info.get('change_pct', 0)
+        delta_str = f"{change:+.3f} ({change_pct:+.2f}%)" if change else None
+        st.metric(
+            "🇺🇸 美債10Y",
+            f"{us10y:.3f}%",
+            delta=delta_str,
+            delta_color="inverse"
+        )
+    with col2:
+        source = treasury_info.get('source', 'N/A')
+        source_label = "Yahoo即時" if source == "yahoo" else "FRED日線" if source == "fred" else source
+        st.caption(f"來源: {source_label}")
+        # 殖利率等級判斷
+        if us10y < 4.0:
+            st.success(f"低利率環境 ({us10y:.2f}%)")
+        elif us10y < 4.5:
+            st.info(f"正常利率 ({us10y:.2f}%)")
+        elif us10y < 5.0:
+            st.warning(f"偏高利率 ({us10y:.2f}%)")
+        else:
+            st.error(f"高利率警戒 ({us10y:.2f}%)")
+    with col3:
+        # 顯示最後抓取時間
+        timestamp = treasury_info.get('timestamp', '')
+        if timestamp:
+            st.caption(f"🕐 最後更新: {timestamp}")
+        else:
+            st.caption("🕐 最後更新: N/A")
+    with col4:
+        st.empty()
+
+
 def render_market_data(market_data: Dict):
     """渲染市場數據"""
     st.subheader("📈 市場數據")
@@ -522,50 +593,6 @@ def render_market_data(market_data: Dict):
     with col8:
         st.metric("距MA5", f"{market_data.get('price_vs_ma5', 0):.0f}")
 
-    # Row 3: 美債殖利率
-    us10y = market_data.get('us10y_yield')
-    if us10y is None:
-        # market_data 中沒有，嘗試單獨呼叫 API
-        try:
-            treasury_data = api_client.get_treasury_yield()
-            if treasury_data and treasury_data.get('success'):
-                us10y = treasury_data.get('yield_pct')
-                market_data['us10y_change'] = treasury_data.get('change')
-                market_data['us10y_change_pct'] = treasury_data.get('change_pct')
-                market_data['us10y_source'] = treasury_data.get('source')
-        except Exception:
-            pass
-
-    if us10y is not None:
-        col9, col10, col11, col12 = st.columns(4)
-
-        with col9:
-            change = market_data.get('us10y_change', 0)
-            change_pct = market_data.get('us10y_change_pct', 0)
-            delta_str = f"{change:+.3f} ({change_pct:+.2f}%)" if change else None
-            st.metric(
-                "🇺🇸 美債10Y",
-                f"{us10y:.3f}%",
-                delta=delta_str,
-                delta_color="inverse"
-            )
-        with col10:
-            source = market_data.get('us10y_source', 'N/A')
-            source_label = "Yahoo即時" if source == "yahoo" else "FRED日線" if source == "fred" else source
-            st.caption(f"來源: {source_label}")
-            # 殖利率等級判斷
-            if us10y < 4.0:
-                st.success(f"低利率環境 ({us10y:.2f}%)")
-            elif us10y < 4.5:
-                st.info(f"正常利率 ({us10y:.2f}%)")
-            elif us10y < 5.0:
-                st.warning(f"偏高利率 ({us10y:.2f}%)")
-            else:
-                st.error(f"高利率警戒 ({us10y:.2f}%)")
-        with col11:
-            st.empty()
-        with col12:
-            st.empty()
 
 def render_signal_history():
     """渲染訊號歷史記錄（全局訊號）"""
@@ -889,6 +916,12 @@ def v7_monitor_page():
         if result is not None:
             st.error(f"❌ 分析失敗：{result.get('error', '未知錯誤')}")
         # result is None 時，analyze_v7() 已經顯示了具體錯誤訊息
+
+    st.markdown("---")
+
+    # 美債殖利率（始終顯示，不依賴分析結果）
+    analysis_market_data = result.get('market_data') if (result and result.get('success')) else None
+    render_treasury_yield(analysis_market_data)
 
     st.markdown("---")
 
