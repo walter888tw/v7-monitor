@@ -335,6 +335,20 @@ class APIClient:
             pass
         return None
 
+    def get_treasury_yield(self) -> Optional[Dict[str, Any]]:
+        """獲取美國 10 年期公債殖利率
+
+        Returns:
+            包含 success, yield_pct, change, change_pct, source 的字典，失敗返回 None
+        """
+        try:
+            response = self._request('GET', '/v7/treasury', timeout=10)
+            if response.status_code == 200:
+                return response.json()
+        except Exception:
+            pass
+        return None
+
     def get_vix_history(self, days: int = 30) -> Optional[Dict[str, Any]]:
         """獲取歷史日線 VIX 數據
 

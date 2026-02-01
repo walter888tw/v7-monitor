@@ -522,6 +522,51 @@ def render_market_data(market_data: Dict):
     with col8:
         st.metric("距MA5", f"{market_data.get('price_vs_ma5', 0):.0f}")
 
+    # Row 3: 美債殖利率
+    us10y = market_data.get('us10y_yield')
+    if us10y is None:
+        # market_data 中沒有，嘗試單獨呼叫 API
+        try:
+            treasury_data = api_client.get_treasury_yield()
+            if treasury_data and treasury_data.get('success'):
+                us10y = treasury_data.get('yield_pct')
+                market_data['us10y_change'] = treasury_data.get('change')
+                market_data['us10y_change_pct'] = treasury_data.get('change_pct')
+                market_data['us10y_source'] = treasury_data.get('source')
+        except Exception:
+            pass
+
+    if us10y is not None:
+        col9, col10, col11, col12 = st.columns(4)
+
+        with col9:
+            change = market_data.get('us10y_change', 0)
+            change_pct = market_data.get('us10y_change_pct', 0)
+            delta_str = f"{change:+.3f} ({change_pct:+.2f}%)" if change else None
+            st.metric(
+                "🇺🇸 美債10Y",
+                f"{us10y:.3f}%",
+                delta=delta_str,
+                delta_color="inverse"
+            )
+        with col10:
+            source = market_data.get('us10y_source', 'N/A')
+            source_label = "Yahoo即時" if source == "yahoo" else "FRED日線" if source == "fred" else source
+            st.caption(f"來源: {source_label}")
+            # 殖利率等級判斷
+            if us10y < 4.0:
+                st.success(f"低利率環境 ({us10y:.2f}%)")
+            elif us10y < 4.5:
+                st.info(f"正常利率 ({us10y:.2f}%)")
+            elif us10y < 5.0:
+                st.warning(f"偏高利率 ({us10y:.2f}%)")
+            else:
+                st.error(f"高利率警戒 ({us10y:.2f}%)")
+        with col11:
+            st.empty()
+        with col12:
+            st.empty()
+
 def render_signal_history():
     """渲染訊號歷史記錄（全局訊號）"""
     st.subheader("📜 今日訊號歷史")
