@@ -19,7 +19,10 @@ import plotly.graph_objects as go
 sys.path.insert(0, str(Path(__file__).parent))
 
 # 導入認證和 API 客戶端
-from utils.auth import init_session, is_authenticated, render_user_info_sidebar
+from utils.auth import (
+    init_session, is_authenticated, render_user_info_sidebar,
+    try_restore_session, login
+)
 from utils.api_client import APIClient
 
 # API 基礎 URL（從 Streamlit Secrets 讀取，無 secrets 時使用環境變數或預設值）
@@ -56,30 +59,21 @@ def auth_page():
 
         email = st.text_input("Email", key="login_email")
         password = st.text_input("密碼", type="password", key="login_password")
+        remember_me = st.checkbox("記住我（7天內自動登入）", key="login_remember_me")
 
         if st.button("登入", use_container_width=True):
             if not email or not password:
                 st.error("❌ 請填寫所有欄位")
                 return
 
-            try:
-                response = requests.post(
-                    f"{API_BASE_URL}/auth/login",
-                    json={"email": email, "password": password}
-                )
+            # 使用 Cookie 持久化登入
+            result = login(API_BASE_URL, email, password, remember_me)
 
-                if response.status_code == 200:
-                    data = response.json()
-                    st.session_state.user_token = data["access_token"]
-                    st.session_state.refresh_token = data["refresh_token"]
-                    st.session_state.user_email = email
-                    st.success("✅ 登入成功！")
-                    st.rerun()
-                else:
-                    error = response.json().get("detail", "登入失敗")
-                    st.error(f"❌ {error}")
-            except Exception as e:
-                st.error(f"❌ 連接失敗：{str(e)}")
+            if result["success"]:
+                st.success("✅ 登入成功！")
+                st.rerun()
+            else:
+                st.error(f"❌ {result['message']}")
 
     with tab2:
         st.markdown("#### 新用戶註冊")
@@ -946,6 +940,9 @@ def v7_monitor_page():
 def main():
     """主程式入口"""
     init_session()
+
+    # 嘗試從 Cookie 恢復登入狀態（解決 Streamlit session 斷線問題）
+    try_restore_session(API_BASE_URL)
 
     # 檢查登入狀態
     if not is_authenticated():
