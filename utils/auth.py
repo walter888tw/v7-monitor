@@ -1,41 +1,38 @@
 # -*- coding: utf-8 -*-
 """
-認證工具模組 v3.0
-提供 JWT 認證相關功能 + 多層持久化登入
+認證工具模組 v4.0
+提供 JWT 認證相關功能 + 服務端 Session ID 管理
 
-v3.0 重構說明（2026-02-05）：
+v4.0 重構說明（2026-02-05）：
 ==================================
-根本問題發現：
-1. Streamlit Cloud 在 iframe 沙箱中運行
-2. localStorage 存在 iframe 內部，頁面重載可能丟失
-3. streamlit-js-eval 第一次調用總是返回 None
+v3.0 問題診斷：
+- Streamlit Cloud WebSocket 斷開會清空 session_state
+- GitHub Issue #8901（P3，至今未解決）
+- localStorage/Cookie 在 Streamlit Cloud iframe 沙箱中不可靠
 
-解決方案（按優先順序）：
-1. st.query_params - URL 參數存儲（不受 iframe 限制，最可靠）
-2. CookieManager - Cookie 存儲（作為備援）
-3. 移除 localStorage 依賴（在 Streamlit Cloud 不可靠）
+v4.0 解決方案：
+- 引入 session_id（32字元）作為前後端橋樑
+- 前端僅存儲短 session_id，不存儲完整 token
+- 新增 /verify-session API，單次調用恢復登入狀態
+- 移除複雜的編碼/解碼邏輯和多次重試機制
 
-參考資料：
-- https://dev.to/hendrixaidev/how-i-solved-streamlit-session-persistence-after-3-failed-attempts-b4c
-- https://docs.streamlit.io/develop/api-reference/caching-and-state/st.query_params
+流程對比：
+v3.0: 存儲 base64(email+refresh_token ~200字元) → /auth/refresh → 解析
+v4.0: 存儲 session_id (32字元) → /auth/verify-session → 直接返回
 """
 import streamlit as st
 import streamlit.components.v1 as components
 import requests
 from typing import Optional, Dict
 from datetime import datetime, timedelta
-import json
 import logging
-import hashlib
-import base64
 
 logger = logging.getLogger(__name__)
 
 # === 常量配置 ===
-COOKIE_NAME = "v7_auth"  # Cookie 名稱
-QUERY_PARAM_KEY = "auth"  # URL 參數鍵名
-COOKIE_EXPIRY_DAYS = 7  # Cookie 過期天數
-MAX_RESTORE_ATTEMPTS = 3  # 最大恢復嘗試次數
+QUERY_PARAM_KEY = "sid"  # URL 參數鍵名（v4.0 改為 sid）
+COOKIE_NAME = "v7_sid"   # Cookie 名稱（v4.0 改為 v7_sid）
+COOKIE_EXPIRY_DAYS = 7   # Cookie 過期天數
 
 # 全局 CookieManager 實例（單例）
 _cookie_manager = None
@@ -49,7 +46,7 @@ def _get_cookie_manager():
 
     try:
         from extra_streamlit_components import CookieManager
-        _cookie_manager = CookieManager(key="v7_cookie_manager_v3")
+        _cookie_manager = CookieManager(key="v7_cookie_manager_v4")
         return _cookie_manager
     except ImportError:
         logger.warning("extra-streamlit-components 未安裝，Cookie 持久化功能將不可用")
@@ -67,12 +64,13 @@ def init_session():
         'user_token': None,
         'user_email': None,
         'refresh_token': None,
+        'session_id': None,  # v4.0 新增
         'user_id': None,
         'username': None,
+        'subscription_tier': None,  # v4.0 新增
         'remember_me': False,
         # 恢復相關狀態
         'auth_restore_done': False,
-        'auth_restore_attempts': 0,
     }
     for key, default_value in defaults.items():
         if key not in st.session_state:
@@ -98,73 +96,20 @@ def get_headers() -> Dict[str, str]:
     return {}
 
 
-# ==================== 認證數據編碼/解碼 ====================
+# ==================== Session ID 存儲層（v4.0 簡化版） ====================
 
-def _encode_auth_data(email: str, refresh_token: str) -> str:
+def save_session_id(session_id: str):
     """
-    將認證數據編碼為 URL 安全字串
+    保存 Session ID（v4.0）
 
-    格式：base64(json({email, token, checksum}))
-    """
-    checksum = hashlib.sha256(f"{email}:{refresh_token}".encode()).hexdigest()[:8]
-    data = {
-        "e": email,
-        "t": refresh_token,
-        "c": checksum,
-        "ts": datetime.now().isoformat()
-    }
-    json_str = json.dumps(data, separators=(',', ':'))
-    # 使用 URL 安全的 base64 編碼
-    encoded = base64.urlsafe_b64encode(json_str.encode()).decode()
-    return encoded
-
-
-def _decode_auth_data(encoded: str) -> Optional[Dict]:
-    """
-    解碼認證數據
-
-    Returns:
-        {"email": str, "refresh_token": str} 或 None
-    """
-    try:
-        json_str = base64.urlsafe_b64decode(encoded.encode()).decode()
-        data = json.loads(json_str)
-
-        email = data.get("e")
-        refresh_token = data.get("t")
-        checksum = data.get("c")
-
-        if not email or not refresh_token:
-            return None
-
-        # 驗證校驗碼
-        expected = hashlib.sha256(f"{email}:{refresh_token}".encode()).hexdigest()[:8]
-        if checksum != expected:
-            logger.warning("認證數據校驗失敗")
-            return None
-
-        return {"email": email, "refresh_token": refresh_token}
-    except Exception as e:
-        logger.debug(f"解碼認證數據失敗: {e}")
-        return None
-
-
-# ==================== 存儲層（多層備援） ====================
-
-def save_auth_data(email: str, refresh_token: str):
-    """
-    保存認證數據（多層存儲）
-
-    優先順序：
+    存儲位置（按優先順序）：
     1. st.query_params - URL 參數（最可靠，不受 iframe 限制）
     2. Cookie - 作為備援
     """
-    encoded = _encode_auth_data(email, refresh_token)
-
     # 1. 保存到 URL 參數（主要）
     try:
-        st.query_params[QUERY_PARAM_KEY] = encoded
-        logger.info(f"認證數據已存入 URL 參數: {email}")
+        st.query_params[QUERY_PARAM_KEY] = session_id
+        logger.info(f"Session ID 已存入 URL 參數")
     except Exception as e:
         logger.warning(f"URL 參數存儲失敗: {e}")
 
@@ -173,31 +118,29 @@ def save_auth_data(email: str, refresh_token: str):
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
             expires_at = datetime.now() + timedelta(days=COOKIE_EXPIRY_DAYS)
-            cookie_manager.set(COOKIE_NAME, encoded, expires_at=expires_at)
-            logger.info(f"認證數據已存入 Cookie: {email}")
+            cookie_manager.set(COOKIE_NAME, session_id, expires_at=expires_at)
+            logger.info(f"Session ID 已存入 Cookie")
     except Exception as e:
         logger.warning(f"Cookie 存儲失敗: {e}")
 
 
-def load_auth_data() -> Optional[Dict]:
+def load_session_id() -> Optional[str]:
     """
-    讀取認證數據（多層讀取）
+    讀取 Session ID（v4.0）
 
-    優先順序：
+    讀取位置（按優先順序）：
     1. st.query_params - URL 參數
     2. Cookie
 
     Returns:
-        {"email": str, "refresh_token": str} 或 None
+        Session ID 或 None
     """
     # 1. 從 URL 參數讀取（優先）
     try:
-        encoded = st.query_params.get(QUERY_PARAM_KEY)
-        if encoded:
-            auth_data = _decode_auth_data(encoded)
-            if auth_data:
-                logger.info("從 URL 參數讀取認證數據成功")
-                return auth_data
+        sid = st.query_params.get(QUERY_PARAM_KEY)
+        if sid and len(sid) >= 20:  # session_id 至少 20 字元
+            logger.info("從 URL 參數讀取 Session ID 成功")
+            return sid
     except Exception as e:
         logger.debug(f"URL 參數讀取失敗: {e}")
 
@@ -205,25 +148,23 @@ def load_auth_data() -> Optional[Dict]:
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
-            encoded = cookie_manager.get(COOKIE_NAME)
-            if encoded:
-                auth_data = _decode_auth_data(encoded)
-                if auth_data:
-                    logger.info("從 Cookie 讀取認證數據成功")
-                    # 同步到 URL 參數
-                    try:
-                        st.query_params[QUERY_PARAM_KEY] = encoded
-                    except:
-                        pass
-                    return auth_data
+            sid = cookie_manager.get(COOKIE_NAME)
+            if sid and len(sid) >= 20:
+                logger.info("從 Cookie 讀取 Session ID 成功")
+                # 同步到 URL 參數
+                try:
+                    st.query_params[QUERY_PARAM_KEY] = sid
+                except:
+                    pass
+                return sid
     except Exception as e:
         logger.debug(f"Cookie 讀取失敗: {e}")
 
     return None
 
 
-def clear_auth_data():
-    """清除所有認證存儲"""
+def clear_session_id():
+    """清除所有 Session ID 存儲"""
     # 清除 URL 參數
     try:
         if QUERY_PARAM_KEY in st.query_params:
@@ -242,59 +183,66 @@ def clear_auth_data():
         logger.debug(f"Cookie 清除失敗: {e}")
 
 
-# ==================== Token 管理 ====================
+# ==================== v4.0 核心：Session 驗證 ====================
 
-def refresh_access_token(api_base_url: str, refresh_token: str) -> Optional[str]:
+def verify_session(api_base_url: str, session_id: str) -> Optional[Dict]:
     """
-    刷新 Access Token
+    向後端驗證 Session ID（v4.0 核心）
 
     Args:
         api_base_url: API 基礎 URL
-        refresh_token: Refresh Token
+        session_id: 要驗證的 Session ID
 
     Returns:
-        新的 Access Token，失敗返回 None
+        成功時返回 {"success": True, "access_token": ..., "user": {...}, ...}
+        失敗時返回 None
     """
     try:
-        response = requests.post(
-            f"{api_base_url}/auth/refresh",
-            json={"refresh_token": refresh_token},
-            timeout=15
+        response = requests.get(
+            f"{api_base_url}/auth/verify-session",
+            params={"sid": session_id},
+            timeout=10
         )
 
         if response.status_code == 200:
             data = response.json()
-            return data.get("access_token")
+            if data.get("success"):
+                logger.info("Session 驗證成功")
+                return data
+            else:
+                logger.warning(f"Session 驗證失敗: {data.get('error')}")
+                return None
         else:
-            logger.warning(f"Token 刷新失敗: HTTP {response.status_code}")
+            logger.warning(f"Session 驗證失敗: HTTP {response.status_code}")
             return None
+
     except requests.exceptions.Timeout:
-        logger.warning("Token 刷新超時")
+        logger.warning("Session 驗證超時")
         return None
     except requests.exceptions.ConnectionError:
         logger.warning("無法連接伺服器")
         return None
     except Exception as e:
-        logger.warning(f"Token 刷新失敗: {e}")
+        logger.warning(f"Session 驗證失敗: {e}")
         return None
 
 
-# ==================== 恢復機制 ====================
+# ==================== 恢復機制（v4.0 簡化版） ====================
 
 def try_restore_session(api_base_url: str) -> bool:
     """
-    嘗試恢復登入狀態（v3.0）
+    嘗試恢復登入狀態（v4.0）
 
     流程：
-    1. 檢查是否已登入
-    2. 從多層存儲讀取認證數據
-    3. 使用 refresh_token 獲取新的 access_token
+    1. 檢查是否已登入 → 直接返回
+    2. 讀取 session_id（URL 參數或 Cookie）
+    3. 調用 /verify-session API
     4. 恢復 session state
 
     設計原則：
-    - 最多嘗試 3 次（使用 session_state 計數）
-    - 每次嘗試都完整執行讀取 + API 調用
-    - 失敗後直接進入登入頁，不無限循環
+    - 單次 API 調用，不重試
+    - 失敗直接進入登入頁
+    - 極簡邏輯，減少出錯點
 
     Args:
         api_base_url: API 基礎 URL
@@ -311,56 +259,32 @@ def try_restore_session(api_base_url: str) -> bool:
     if st.session_state.get('auth_restore_done'):
         return False
 
-    # 檢查嘗試次數
-    attempts = st.session_state.get('auth_restore_attempts', 0)
-    st.session_state.auth_restore_attempts = attempts + 1
+    # 讀取 Session ID
+    session_id = load_session_id()
 
-    if attempts >= MAX_RESTORE_ATTEMPTS:
-        logger.info(f"恢復嘗試已達上限 ({MAX_RESTORE_ATTEMPTS})")
+    if not session_id:
+        logger.info("無 Session ID，進入登入頁")
         st.session_state.auth_restore_done = True
         return False
 
-    # 讀取認證數據
-    auth_data = load_auth_data()
+    # 調用後端驗證
+    result = verify_session(api_base_url, session_id)
 
-    if auth_data is None:
-        # 第一次可能讀不到（CookieManager 非同步）
-        # 使用 st.rerun() 觸發第二次嘗試，但有上限保護
-        if attempts < MAX_RESTORE_ATTEMPTS - 1:
-            logger.info(f"嘗試 {attempts + 1}/{MAX_RESTORE_ATTEMPTS}：等待數據載入...")
-            import time
-            time.sleep(0.3)  # 短暫等待
-            st.rerun()
-            return False
-        else:
-            logger.info("無法讀取認證數據，進入登入頁")
-            st.session_state.auth_restore_done = True
-            return False
-
-    # 獲取 email 和 refresh_token
-    email = auth_data.get("email")
-    refresh_token = auth_data.get("refresh_token")
-
-    if not email or not refresh_token:
-        st.session_state.auth_restore_done = True
-        return False
-
-    # 調用 API 刷新 token
-    access_token = refresh_access_token(api_base_url, refresh_token)
-
-    if access_token:
+    if result:
         # 恢復成功
-        st.session_state.user_token = access_token
-        st.session_state.refresh_token = refresh_token
-        st.session_state.user_email = email
+        st.session_state.user_token = result["access_token"]
+        st.session_state.session_id = result.get("session_id", session_id)
+        st.session_state.user_email = result["user"]["email"]
+        st.session_state.username = result["user"].get("username")
+        st.session_state.subscription_tier = result["user"].get("subscription_tier")
         st.session_state.remember_me = True
         st.session_state.auth_restore_done = True
-        logger.info(f"登入狀態已恢復: {email}")
+        logger.info(f"登入狀態已恢復: {result['user']['email']}")
         return True
     else:
-        # Token 過期或無效，清除存儲
-        logger.info("Refresh token 已過期，清除存儲")
-        clear_auth_data()
+        # 驗證失敗，清除存儲
+        logger.info("Session 驗證失敗，清除存儲")
+        clear_session_id()
         st.session_state.auth_restore_done = True
         return False
 
@@ -369,7 +293,7 @@ def try_restore_session(api_base_url: str) -> bool:
 
 def login(api_base_url: str, email: str, password: str, remember_me: bool = False) -> Dict:
     """
-    執行登入
+    執行登入（v4.0）
 
     Args:
         api_base_url: API 基礎 URL
@@ -393,13 +317,14 @@ def login(api_base_url: str, email: str, password: str, remember_me: bool = Fals
             # 儲存到 session state
             st.session_state.user_token = data["access_token"]
             st.session_state.refresh_token = data["refresh_token"]
+            st.session_state.session_id = data["session_id"]  # v4.0 新增
             st.session_state.user_email = email
             st.session_state.remember_me = remember_me
             st.session_state.auth_restore_done = True
 
-            # 如果勾選「記住我」，保存到持久化存儲
+            # 如果勾選「記住我」，保存 session_id 到持久化存儲
             if remember_me:
-                save_auth_data(email, data["refresh_token"])
+                save_session_id(data["session_id"])
 
             return {"success": True, "message": "登入成功"}
         else:
@@ -416,7 +341,7 @@ def login(api_base_url: str, email: str, password: str, remember_me: bool = Fals
 
 def logout(api_base_url: str):
     """
-    登出
+    登出（v4.0）
 
     Args:
         api_base_url: API 基礎 URL
@@ -433,17 +358,18 @@ def logout(api_base_url: str):
             pass
 
     # 清除持久化存儲
-    clear_auth_data()
+    clear_session_id()
 
     # 清除 session state
     st.session_state.user_token = None
     st.session_state.user_email = None
     st.session_state.refresh_token = None
+    st.session_state.session_id = None
     st.session_state.user_id = None
     st.session_state.username = None
+    st.session_state.subscription_tier = None
     st.session_state.remember_me = False
     st.session_state.auth_restore_done = False
-    st.session_state.auth_restore_attempts = 0
 
     st.success("已登出")
     st.rerun()
@@ -459,7 +385,8 @@ def get_user_info() -> Optional[Dict[str, str]]:
     return {
         'email': st.session_state.user_email,
         'username': st.session_state.username,
-        'user_id': st.session_state.user_id
+        'user_id': st.session_state.user_id,
+        'subscription_tier': st.session_state.subscription_tier
     }
 
 
@@ -509,18 +436,18 @@ def render_login_form(api_base_url: str) -> bool:
     return False
 
 
-# ==================== 頁面可見性監聽（簡化版） ====================
+# ==================== 頁面可見性監聽（v4.0 簡化版） ====================
 
 def inject_visibility_listener():
     """
-    注入頁面可見性監聽器（v3.0 簡化版）
+    注入頁面可見性監聯器（v4.0 極簡版）
 
-    v3.0 改進：
-    - 不再依賴 localStorage（不可靠）
-    - 不再自動 reload（避免循環）
+    v4.0 改進：
+    - 不再依賴 localStorage
+    - 不自動 reload
     - 只記錄日誌，讓 Streamlit 的 15 秒自動刷新處理
     """
-    # 已認證時才注入，避免在登入頁增加複雜度
+    # 已認證時才注入
     if not is_authenticated():
         return
 
@@ -528,7 +455,6 @@ def inject_visibility_listener():
     if st.session_state.get('visibility_listener_injected'):
         return
 
-    # 簡化版：只記錄可見性變化，不自動 reload
     js_code = """
     <script>
     (function() {
@@ -543,7 +469,7 @@ def inject_visibility_listener():
             }
         });
 
-        console.log('[V7] 可見性監聽器已安裝 (v3.0 簡化版)');
+        console.log('[V7] 可見性監聽器已安裝 (v4.0)');
     })();
     </script>
     """
@@ -556,16 +482,15 @@ def inject_visibility_listener():
 
 def render_loading_screen():
     """渲染恢復登入狀態的載入畫面"""
-    attempts = st.session_state.get('auth_restore_attempts', 0)
-    st.markdown(f"""
+    st.markdown("""
     <div style="display: flex; justify-content: center; align-items: center; height: 200px;">
         <div style="text-align: center;">
             <div class="auth-spinner"></div>
-            <p style="color: #666; margin-top: 16px;">正在恢復登入狀態... ({attempts}/{MAX_RESTORE_ATTEMPTS})</p>
+            <p style="color: #666; margin-top: 16px;">正在恢復登入狀態...</p>
         </div>
     </div>
     <style>
-    .auth-spinner {{
+    .auth-spinner {
         width: 40px;
         height: 40px;
         border: 4px solid #f3f3f3;
@@ -573,10 +498,58 @@ def render_loading_screen():
         border-radius: 50%;
         animation: auth-spin 1s linear infinite;
         margin: 0 auto;
-    }}
-    @keyframes auth-spin {{
-        0% {{ transform: rotate(0deg); }}
-        100% {{ transform: rotate(360deg); }}
-    }}
+    }
+    @keyframes auth-spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
     </style>
     """, unsafe_allow_html=True)
+
+
+# ==================== 向後兼容（v3.0 遷移） ====================
+
+# 保留舊函式名稱，避免 app.py 報錯
+def save_auth_data(email: str, refresh_token: str):
+    """v3.0 向後兼容：改用 save_session_id"""
+    logger.warning("save_auth_data() 已棄用，請使用 save_session_id()")
+    # 在 v4.0 中，這個函式不再有意義，因為我們不存儲 refresh_token
+    pass
+
+
+def load_auth_data() -> Optional[Dict]:
+    """v3.0 向後兼容：改用 load_session_id"""
+    logger.warning("load_auth_data() 已棄用，請使用 load_session_id()")
+    return None
+
+
+def clear_auth_data():
+    """v3.0 向後兼容：改用 clear_session_id"""
+    clear_session_id()
+
+
+def refresh_access_token(api_base_url: str, refresh_token: str) -> Optional[str]:
+    """
+    刷新 Access Token（v3.0 向後兼容）
+
+    v4.0 說明：此函式保留用於向後兼容，新代碼應使用 verify_session()
+    """
+    try:
+        response = requests.post(
+            f"{api_base_url}/auth/refresh",
+            json={"refresh_token": refresh_token},
+            timeout=15
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+            # v4.0: 同時更新 session_id
+            if data.get("session_id"):
+                st.session_state.session_id = data["session_id"]
+            return data.get("access_token")
+        else:
+            logger.warning(f"Token 刷新失敗: HTTP {response.status_code}")
+            return None
+    except Exception as e:
+        logger.warning(f"Token 刷新失敗: {e}")
+        return None
