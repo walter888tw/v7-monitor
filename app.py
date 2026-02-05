@@ -21,8 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # 導入認證和 API 客戶端
 from utils.auth import (
     init_session, is_authenticated, render_user_info_sidebar,
-    try_restore_session, login, inject_visibility_listener,
-    render_loading_screen
+    try_restore_session, login, inject_visibility_listener
 )
 from utils.api_client import APIClient
 
@@ -986,26 +985,26 @@ def main():
     """
     主程式入口
 
-    認證流程（v2.1 簡化版）：
+    認證流程（v3.0）：
     1. 初始化 session state
-    2. 嘗試恢復登入狀態（單次嘗試，不循環）
+    2. 嘗試恢復登入狀態（從 URL 參數 + Cookie 雙層讀取）
     3. 注入頁面可見性監聽器
     4. 顯示對應頁面
 
-    v2.1 改進（2026-02-05）：
-    - 移除載入畫面等待（避免無限卡住）
-    - 簡化恢復邏輯（單次嘗試，失敗直接進登入頁）
-    - 修正「網站轉向太多次」問題
+    v3.0 改進（2026-02-05）：
+    - 使用 st.query_params 作為主要存儲（不受 iframe 限制）
+    - Cookie 作為備援存儲
+    - 移除 localStorage 依賴（在 Streamlit Cloud iframe 中不可靠）
+    - 最多 3 次重試（有上限保護，避免無限循環）
+    - 解決「網站轉向太多次」問題
     """
     init_session()
 
-    # 嘗試恢復登入狀態（單次嘗試，不會無限循環）
+    # 嘗試恢復登入狀態
+    # v3.0: 使用 st.query_params + Cookie 雙層讀取，最多 3 次重試
     try_restore_session(API_BASE_URL)
 
-    # 標記恢復完成（無論成功與否）
-    st.session_state.cookie_restore_done = True
-
-    # 注入頁面可見性監聽器（在恢復完成後注入）
+    # 注入頁面可見性監聯器（在恢復完成後注入）
     inject_visibility_listener()
 
     # 檢查登入狀態

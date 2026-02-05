@@ -1,29 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-認證工具模組 v2.0
-提供 JWT 認證相關功能 + 雙重存儲持久化登入
+認證工具模組 v3.0
+提供 JWT 認證相關功能 + 多層持久化登入
 
-重構說明（2026-02-05 v2.0）：
+v3.0 重構說明（2026-02-05）：
 ==================================
-問題：手機切換 app 後被登出，即使勾選「7天自動登入」
+根本問題發現：
+1. Streamlit Cloud 在 iframe 沙箱中運行
+2. localStorage 存在 iframe 內部，頁面重載可能丟失
+3. streamlit-js-eval 第一次調用總是返回 None
 
-根本原因分析（第一性原則）：
-1. Streamlit session_state 存在於服務器端 Python 進程
-2. 手機切換 app → 瀏覽器休眠/釋放頁面 → WebSocket 斷開
-3. 回來時可能是新 session → session_state 被清空
-4. 但瀏覽器的 Cookie/localStorage 是持久化的
-5. 所以需要從瀏覽器端持久化存儲恢復登入狀態
+解決方案（按優先順序）：
+1. st.query_params - URL 參數存儲（不受 iframe 限制，最可靠）
+2. CookieManager - Cookie 存儲（作為備援）
+3. 移除 localStorage 依賴（在 Streamlit Cloud 不可靠）
 
-解決方案：
-1. 雙重存儲：localStorage（主要）+ Cookie（備援）
-2. 智能恢復：指數退避重試 + 多源讀取
-3. 頁面可見性監聽：visibilitychange 事件觸發恢復
-4. Token 自動刷新：Access Token 過期前主動刷新
-
-技術棧：
-- streamlit-js-eval: 直接執行 JavaScript，讀寫 localStorage
-- extra-streamlit-components: CookieManager 作為備援
-- PyJWT: 解析 Token 過期時間
+參考資料：
+- https://dev.to/hendrixaidev/how-i-solved-streamlit-session-persistence-after-3-failed-attempts-b4c
+- https://docs.streamlit.io/develop/api-reference/caching-and-state/st.query_params
 """
 import streamlit as st
 import streamlit.components.v1 as components
@@ -33,37 +27,29 @@ from datetime import datetime, timedelta
 import json
 import logging
 import hashlib
+import base64
 
 logger = logging.getLogger(__name__)
 
 # === 常量配置 ===
-COOKIE_NAME = "v7_auth"  # Cookie 名稱（與 V5 區分）
-LOCALSTORAGE_KEY = "v7_auth_data"  # localStorage 鍵名
-COOKIE_EXPIRY_DAYS = 7  # Cookie 過期天數（與 Refresh Token 同步）
-# v2.1: 簡化重試機制，避免無限循環
-MAX_RESTORE_ATTEMPTS = 2  # 最大恢復嘗試次數（減少，避免循環）
-BACKOFF_TIMES = [0, 0.5]  # 簡化退避時間
-VISIBILITY_HIDDEN_THRESHOLD = 60000  # 頁面隱藏超過此毫秒數觸發重載（增加到 60 秒）
+COOKIE_NAME = "v7_auth"  # Cookie 名稱
+QUERY_PARAM_KEY = "auth"  # URL 參數鍵名
+COOKIE_EXPIRY_DAYS = 7  # Cookie 過期天數
+MAX_RESTORE_ATTEMPTS = 3  # 最大恢復嘗試次數
 
 # 全局 CookieManager 實例（單例）
 _cookie_manager = None
 
 
 def _get_cookie_manager():
-    """
-    獲取 Cookie Manager 實例（單例模式）
-
-    使用 extra-streamlit-components 套件
-    注意：CookieManager 是非同步的，需要等待頁面渲染
-    """
+    """獲取 Cookie Manager 實例（單例模式）"""
     global _cookie_manager
     if _cookie_manager is not None:
         return _cookie_manager
 
     try:
         from extra_streamlit_components import CookieManager
-        # 使用固定的 key 避免重複創建
-        _cookie_manager = CookieManager(key="v7_cookie_manager")
+        _cookie_manager = CookieManager(key="v7_cookie_manager_v3")
         return _cookie_manager
     except ImportError:
         logger.warning("extra-streamlit-components 未安裝，Cookie 持久化功能將不可用")
@@ -84,11 +70,9 @@ def init_session():
         'user_id': None,
         'username': None,
         'remember_me': False,
-        # Cookie 恢復相關狀態
-        'cookie_restore_attempts': 0,
-        'cookie_restore_done': False,
-        # 可見性監聽器狀態
-        'visibility_listener_injected': False,
+        # 恢復相關狀態
+        'auth_restore_done': False,
+        'auth_restore_attempts': 0,
     }
     for key, default_value in defaults.items():
         if key not in st.session_state:
@@ -104,7 +88,6 @@ def require_auth():
     """要求用戶認證，未認證則跳轉到登入頁"""
     if not is_authenticated():
         st.warning("請先登入")
-        st.info("請返回首頁進行登入")
         st.stop()
 
 
@@ -115,501 +98,271 @@ def get_headers() -> Dict[str, str]:
     return {}
 
 
-# ==================== 雙重存儲層 ====================
+# ==================== 認證數據編碼/解碼 ====================
 
-def _compute_checksum(email: str, refresh_token: str) -> str:
-    """計算校驗碼（防篡改）"""
-    return hashlib.sha256(f"{email}:{refresh_token}".encode()).hexdigest()[:16]
-
-
-def save_auth_dual(email: str, refresh_token: str):
+def _encode_auth_data(email: str, refresh_token: str) -> str:
     """
-    雙重存儲：localStorage（優先）+ Cookie（備援）
+    將認證數據編碼為 URL 安全字串
 
-    為什麼要雙重存儲：
-    1. localStorage 更可靠，但某些瀏覽器隱私模式可能禁用
-    2. Cookie 有 4KB 限制，但相容性更好
-    3. 雙重存儲確保至少一個可用
-
-    Args:
-        email: 用戶 email
-        refresh_token: Refresh Token（用於恢復登入）
+    格式：base64(json({email, token, checksum}))
     """
-    expires_at = datetime.now() + timedelta(days=COOKIE_EXPIRY_DAYS)
-
-    # 構建認證資料（含校驗碼）
-    auth_data = {
-        "email": email,
-        "refresh_token": refresh_token,
-        "saved_at": datetime.now().isoformat(),
-        "expires_at": expires_at.isoformat(),
-        "checksum": _compute_checksum(email, refresh_token)
+    checksum = hashlib.sha256(f"{email}:{refresh_token}".encode()).hexdigest()[:8]
+    data = {
+        "e": email,
+        "t": refresh_token,
+        "c": checksum,
+        "ts": datetime.now().isoformat()
     }
-    auth_json = json.dumps(auth_data)
+    json_str = json.dumps(data, separators=(',', ':'))
+    # 使用 URL 安全的 base64 編碼
+    encoded = base64.urlsafe_b64encode(json_str.encode()).decode()
+    return encoded
 
-    # 1. 存入 localStorage（使用 streamlit-js-eval）
+
+def _decode_auth_data(encoded: str) -> Optional[Dict]:
+    """
+    解碼認證數據
+
+    Returns:
+        {"email": str, "refresh_token": str} 或 None
+    """
     try:
-        from streamlit_js_eval import streamlit_js_eval
-        # 使用唯一 key 避免衝突
-        key = f"save_ls_{datetime.now().timestamp()}"
-        # 需要轉義 JSON 字串中的特殊字符
-        escaped_json = auth_json.replace("'", "\\'")
-        js_code = f"localStorage.setItem('{LOCALSTORAGE_KEY}', '{escaped_json}')"
-        streamlit_js_eval(js_expressions=js_code, key=key)
-        logger.info(f"認證資料已存入 localStorage: {email}")
-    except ImportError:
-        logger.warning("streamlit-js-eval 未安裝，localStorage 存儲不可用")
-    except Exception as e:
-        logger.warning(f"localStorage 存儲失敗: {e}")
+        json_str = base64.urlsafe_b64decode(encoded.encode()).decode()
+        data = json.loads(json_str)
 
-    # 2. 存入 Cookie（使用 CookieManager，作為備援）
+        email = data.get("e")
+        refresh_token = data.get("t")
+        checksum = data.get("c")
+
+        if not email or not refresh_token:
+            return None
+
+        # 驗證校驗碼
+        expected = hashlib.sha256(f"{email}:{refresh_token}".encode()).hexdigest()[:8]
+        if checksum != expected:
+            logger.warning("認證數據校驗失敗")
+            return None
+
+        return {"email": email, "refresh_token": refresh_token}
+    except Exception as e:
+        logger.debug(f"解碼認證數據失敗: {e}")
+        return None
+
+
+# ==================== 存儲層（多層備援） ====================
+
+def save_auth_data(email: str, refresh_token: str):
+    """
+    保存認證數據（多層存儲）
+
+    優先順序：
+    1. st.query_params - URL 參數（最可靠，不受 iframe 限制）
+    2. Cookie - 作為備援
+    """
+    encoded = _encode_auth_data(email, refresh_token)
+
+    # 1. 保存到 URL 參數（主要）
+    try:
+        st.query_params[QUERY_PARAM_KEY] = encoded
+        logger.info(f"認證數據已存入 URL 參數: {email}")
+    except Exception as e:
+        logger.warning(f"URL 參數存儲失敗: {e}")
+
+    # 2. 保存到 Cookie（備援）
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
-            cookie_manager.set(
-                COOKIE_NAME,
-                auth_json,
-                expires_at=expires_at
-            )
-            logger.info(f"認證資料已存入 Cookie: {email}")
+            expires_at = datetime.now() + timedelta(days=COOKIE_EXPIRY_DAYS)
+            cookie_manager.set(COOKIE_NAME, encoded, expires_at=expires_at)
+            logger.info(f"認證數據已存入 Cookie: {email}")
     except Exception as e:
         logger.warning(f"Cookie 存儲失敗: {e}")
 
 
-def load_auth_from_localstorage() -> Optional[Dict]:
+def load_auth_data() -> Optional[Dict]:
     """
-    從 localStorage 讀取認證資料（使用 streamlit-js-eval）
+    讀取認證數據（多層讀取）
 
-    優點：
-    1. 直接執行 JavaScript，不需要等待組件渲染
-    2. 同步返回結果（比 CookieManager 更可靠）
+    優先順序：
+    1. st.query_params - URL 參數
+    2. Cookie
 
     Returns:
-        認證資訊字典 {"email": str, "refresh_token": str}
-        如果沒有有效資料則返回 None
+        {"email": str, "refresh_token": str} 或 None
     """
+    # 1. 從 URL 參數讀取（優先）
     try:
-        from streamlit_js_eval import streamlit_js_eval
-
-        # 使用動態 key 避免快取問題
-        attempts = st.session_state.get('cookie_restore_attempts', 0)
-        key = f"load_ls_{attempts}_{datetime.now().timestamp()}"
-
-        result = streamlit_js_eval(
-            js_expressions=f"localStorage.getItem('{LOCALSTORAGE_KEY}')",
-            key=key
-        )
-
-        if not result:
-            return None
-
-        auth_data = json.loads(result)
-
-        # 驗證必要欄位
-        if not auth_data.get("email") or not auth_data.get("refresh_token"):
-            logger.warning("localStorage 資料缺少必要欄位")
-            return None
-
-        # 驗證校驗碼（防篡改）
-        if "checksum" in auth_data:
-            expected = _compute_checksum(auth_data['email'], auth_data['refresh_token'])
-            if auth_data["checksum"] != expected:
-                logger.warning("認證資料校驗失敗，可能被篡改")
-                return None
-
-        # 驗證是否過期
-        if "expires_at" in auth_data:
-            expires_at = datetime.fromisoformat(auth_data["expires_at"])
-            if datetime.now() > expires_at:
-                logger.info("認證資料已過期")
-                return None
-
-        return auth_data
-
-    except ImportError:
-        logger.debug("streamlit-js-eval 未安裝")
-        return None
-    except json.JSONDecodeError:
-        logger.warning("localStorage 資料格式錯誤")
-        return None
+        encoded = st.query_params.get(QUERY_PARAM_KEY)
+        if encoded:
+            auth_data = _decode_auth_data(encoded)
+            if auth_data:
+                logger.info("從 URL 參數讀取認證數據成功")
+                return auth_data
     except Exception as e:
-        logger.debug(f"localStorage 讀取失敗: {e}")
-        return None
+        logger.debug(f"URL 參數讀取失敗: {e}")
 
-
-def load_auth_cookie() -> Optional[Dict]:
-    """
-    從 Cookie 載入認證資訊（備援方案）
-
-    注意：CookieManager 是非同步的，第一次呼叫可能返回 None
-
-    Returns:
-        認證資訊字典 {"email": str, "refresh_token": str}
-        如果沒有有效 Cookie 則返回 None
-    """
+    # 2. 從 Cookie 讀取（備援）
     try:
         cookie_manager = _get_cookie_manager()
-        if cookie_manager is None:
-            return None
-
-        # 讀取 Cookie（非同步，可能需要等待）
-        cookie_value = cookie_manager.get(COOKIE_NAME)
-        if not cookie_value:
-            return None
-
-        # 解析 JSON
-        auth_data = json.loads(cookie_value)
-
-        # 驗證必要欄位
-        if "email" not in auth_data or "refresh_token" not in auth_data:
-            return None
-
-        # 驗證校驗碼（如果有）
-        if "checksum" in auth_data:
-            expected = _compute_checksum(auth_data['email'], auth_data['refresh_token'])
-            if auth_data["checksum"] != expected:
-                logger.warning("Cookie 認證資料校驗失敗")
-                return None
-
-        # 驗證是否過期
-        if "expires_at" in auth_data:
-            expires_at = datetime.fromisoformat(auth_data["expires_at"])
-            if datetime.now() > expires_at:
-                logger.info("Cookie 認證資料已過期")
-                return None
-
-        return auth_data
-
-    except json.JSONDecodeError:
-        logger.warning("Cookie 格式錯誤")
-        return None
+        if cookie_manager:
+            encoded = cookie_manager.get(COOKIE_NAME)
+            if encoded:
+                auth_data = _decode_auth_data(encoded)
+                if auth_data:
+                    logger.info("從 Cookie 讀取認證數據成功")
+                    # 同步到 URL 參數
+                    try:
+                        st.query_params[QUERY_PARAM_KEY] = encoded
+                    except:
+                        pass
+                    return auth_data
     except Exception as e:
-        logger.warning(f"載入 Cookie 失敗: {e}")
-        return None
+        logger.debug(f"Cookie 讀取失敗: {e}")
+
+    return None
 
 
-def clear_auth_storage():
-    """清除所有認證存儲（localStorage + Cookie）"""
-    # 清除 localStorage
+def clear_auth_data():
+    """清除所有認證存儲"""
+    # 清除 URL 參數
     try:
-        from streamlit_js_eval import streamlit_js_eval
-        streamlit_js_eval(
-            js_expressions=f"localStorage.removeItem('{LOCALSTORAGE_KEY}')",
-            key=f"clear_ls_{datetime.now().timestamp()}"
-        )
-        logger.info("localStorage 認證資料已清除")
+        if QUERY_PARAM_KEY in st.query_params:
+            del st.query_params[QUERY_PARAM_KEY]
+        logger.info("URL 參數已清除")
     except Exception as e:
-        logger.debug(f"localStorage 清除失敗: {e}")
+        logger.debug(f"URL 參數清除失敗: {e}")
 
     # 清除 Cookie
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
             cookie_manager.delete(COOKIE_NAME)
-            logger.info("Cookie 認證資料已清除")
+            logger.info("Cookie 已清除")
     except Exception as e:
         logger.debug(f"Cookie 清除失敗: {e}")
 
 
-# ==================== 頁面可見性監聽 ====================
-
-def inject_visibility_listener():
-    """
-    注入頁面可見性監聯器（v2.1 簡化版）
-
-    v2.1 改進（2026-02-05）：
-    - 增加 reload 次數限制，防止無限循環
-    - 增加閾值到 60 秒（原 30 秒太敏感）
-    - 增加防護機制
-    """
-    # 只注入一次
-    if st.session_state.get('visibility_listener_injected'):
-        return
-
-    js_code = f"""
-    <script>
-    (function() {{
-        // 防止重複注入
-        if (window._v7_visibility_listener) return;
-        window._v7_visibility_listener = true;
-
-        // 記錄最後活動時間
-        let lastActiveTime = Date.now();
-
-        // 防止無限 reload 的計數器（存在 sessionStorage，頁面關閉就重置）
-        const RELOAD_COUNT_KEY = 'v7_reload_count';
-        const MAX_RELOADS = 2;  // 最多連續 reload 2 次
-
-        function getReloadCount() {{
-            return parseInt(sessionStorage.getItem(RELOAD_COUNT_KEY) || '0', 10);
-        }}
-
-        function incrementReloadCount() {{
-            const count = getReloadCount() + 1;
-            sessionStorage.setItem(RELOAD_COUNT_KEY, count.toString());
-            return count;
-        }}
-
-        function resetReloadCount() {{
-            sessionStorage.removeItem(RELOAD_COUNT_KEY);
-        }}
-
-        // 頁面載入後 10 秒重置計數器（正常使用）
-        setTimeout(function() {{
-            resetReloadCount();
-        }}, 10000);
-
-        document.addEventListener('visibilitychange', function() {{
-            if (document.hidden) {{
-                // 頁面隱藏，記錄時間
-                lastActiveTime = Date.now();
-                console.log('[V7 Auth] 頁面隱藏');
-            }} else {{
-                // 頁面可見
-                const hiddenDuration = Date.now() - lastActiveTime;
-                console.log('[V7 Auth] 頁面可見，隱藏時長: ' + hiddenDuration + 'ms');
-
-                // 防護：檢查是否已經 reload 太多次
-                const reloadCount = getReloadCount();
-                if (reloadCount >= MAX_RELOADS) {{
-                    console.log('[V7 Auth] 已達 reload 上限，停止 reload');
-                    return;
-                }}
-
-                // 如果隱藏超過閾值，觸發重新載入
-                if (hiddenDuration > {VISIBILITY_HIDDEN_THRESHOLD}) {{
-                    console.log('[V7 Auth] 隱藏超過 {VISIBILITY_HIDDEN_THRESHOLD // 1000} 秒，觸發重新載入');
-                    incrementReloadCount();
-                    window.location.reload();
-                }}
-            }}
-        }});
-
-        console.log('[V7 Auth] 可見性監聽器已安裝 (v2.1)');
-    }})();
-    </script>
-    """
-
-    components.html(js_code, height=0)
-    st.session_state.visibility_listener_injected = True
-
-
 # ==================== Token 管理 ====================
 
-def ensure_valid_token(api_base_url: str) -> bool:
-    """
-    確保 Access Token 有效
-
-    在每次 API 請求前呼叫，自動處理 Token 刷新
-    如果 Token 即將過期（< 5 分鐘），主動刷新
-
-    Args:
-        api_base_url: API 基礎 URL
-
-    Returns:
-        bool: Token 是否有效
-    """
-    if not st.session_state.get('user_token'):
-        return False
-
-    try:
-        import jwt
-
-        # 解析 Token（不驗證簽名，只讀取 payload）
-        payload = jwt.decode(
-            st.session_state.user_token,
-            options={"verify_signature": False}
-        )
-
-        exp = payload.get('exp')
-        if exp:
-            exp_time = datetime.fromtimestamp(exp)
-            now = datetime.now()
-
-            # 如果還有超過 5 分鐘，Token 有效
-            remaining = (exp_time - now).total_seconds()
-            if remaining > 300:
-                return True
-
-            # 即將過期，嘗試刷新
-            logger.info(f"Access Token 即將過期（剩餘 {remaining:.0f} 秒），嘗試刷新")
-            return refresh_access_token(api_base_url)
-
-        return True
-
-    except ImportError:
-        logger.debug("PyJWT 未安裝，跳過 Token 過期檢查")
-        return True
-    except Exception as e:
-        logger.warning(f"Token 檢查失敗: {e}")
-        # 嘗試刷新
-        return refresh_access_token(api_base_url)
-
-
-def refresh_access_token(api_base_url: str) -> bool:
+def refresh_access_token(api_base_url: str, refresh_token: str) -> Optional[str]:
     """
     刷新 Access Token
 
     Args:
         api_base_url: API 基礎 URL
+        refresh_token: Refresh Token
 
     Returns:
-        bool: 刷新成功返回 True，失敗返回 False
+        新的 Access Token，失敗返回 None
     """
-    if not st.session_state.get('refresh_token'):
-        return False
-
     try:
         response = requests.post(
             f"{api_base_url}/auth/refresh",
-            json={"refresh_token": st.session_state.refresh_token},
-            timeout=10
+            json={"refresh_token": refresh_token},
+            timeout=15
         )
 
         if response.status_code == 200:
             data = response.json()
-            st.session_state.user_token = data["access_token"]
-            logger.info("Access Token 已刷新")
-            return True
+            return data.get("access_token")
         else:
-            # Refresh token 過期或無效，需要重新登入
-            logger.warning(f"Token 刷新失敗: {response.status_code}")
-            return False
-
+            logger.warning(f"Token 刷新失敗: HTTP {response.status_code}")
+            return None
+    except requests.exceptions.Timeout:
+        logger.warning("Token 刷新超時")
+        return None
+    except requests.exceptions.ConnectionError:
+        logger.warning("無法連接伺服器")
+        return None
     except Exception as e:
         logger.warning(f"Token 刷新失敗: {e}")
-        return False
+        return None
 
 
-# ==================== 智能恢復機制 ====================
+# ==================== 恢復機制 ====================
 
 def try_restore_session(api_base_url: str) -> bool:
     """
-    恢復登入狀態（v2.1 簡化版，避免無限循環）
+    嘗試恢復登入狀態（v3.0）
 
-    v2.1 改進（2026-02-05）：
-    - 移除複雜的重試循環，改用單次嘗試
-    - 如果讀不到或失敗，直接進入登入頁（不 rerun）
-    - 避免「網站轉向太多次」錯誤
+    流程：
+    1. 檢查是否已登入
+    2. 從多層存儲讀取認證數據
+    3. 使用 refresh_token 獲取新的 access_token
+    4. 恢復 session state
 
-    策略：
-    1. 只嘗試一次讀取（localStorage → Cookie）
-    2. 如果讀到有效 token，嘗試 refresh
-    3. 成功就恢復，失敗就進入登入頁
-    4. 絕不觸發無限 rerun
+    設計原則：
+    - 最多嘗試 3 次（使用 session_state 計數）
+    - 每次嘗試都完整執行讀取 + API 調用
+    - 失敗後直接進入登入頁，不無限循環
 
     Args:
         api_base_url: API 基礎 URL
 
     Returns:
-        是否成功恢復登入
+        是否成功恢復
     """
     # 如果已經登入，不需要恢復
     if is_authenticated():
-        st.session_state.cookie_restore_done = True
+        st.session_state.auth_restore_done = True
         return True
 
-    # 如果已經完成恢復流程（無論成功與否）
-    if st.session_state.get('cookie_restore_done'):
+    # 如果已完成恢復流程
+    if st.session_state.get('auth_restore_done'):
         return False
 
-    # 記錄嘗試次數（用於調試）
-    attempts = st.session_state.get('cookie_restore_attempts', 0)
-    st.session_state.cookie_restore_attempts = attempts + 1
+    # 檢查嘗試次數
+    attempts = st.session_state.get('auth_restore_attempts', 0)
+    st.session_state.auth_restore_attempts = attempts + 1
 
-    # 防止無限循環：超過 2 次直接放棄
     if attempts >= MAX_RESTORE_ATTEMPTS:
-        logger.warning(f"恢復嘗試已達上限 ({MAX_RESTORE_ATTEMPTS})，放棄恢復")
-        st.session_state.cookie_restore_done = True
+        logger.info(f"恢復嘗試已達上限 ({MAX_RESTORE_ATTEMPTS})")
+        st.session_state.auth_restore_done = True
         return False
 
-    # === 多源讀取（單次嘗試，不重試） ===
-    auth_data = None
-    source = None
+    # 讀取認證數據
+    auth_data = load_auth_data()
 
-    # 嘗試 1: localStorage（優先）
-    auth_data = load_auth_from_localstorage()
-    if auth_data:
-        source = "localStorage"
-        logger.info("從 localStorage 讀取成功")
-
-    # 嘗試 2: Cookie（備援）
     if auth_data is None:
-        auth_data = load_auth_cookie()
-        if auth_data:
-            source = "Cookie"
-            logger.info("從 Cookie 讀取成功")
+        # 第一次可能讀不到（CookieManager 非同步）
+        # 使用 st.rerun() 觸發第二次嘗試，但有上限保護
+        if attempts < MAX_RESTORE_ATTEMPTS - 1:
+            logger.info(f"嘗試 {attempts + 1}/{MAX_RESTORE_ATTEMPTS}：等待數據載入...")
+            import time
+            time.sleep(0.3)  # 短暫等待
+            st.rerun()
+            return False
+        else:
+            logger.info("無法讀取認證數據，進入登入頁")
+            st.session_state.auth_restore_done = True
+            return False
 
-    # 如果都讀不到，直接完成（不重試，避免循環）
-    if auth_data is None:
-        logger.info("無法讀取認證資料，進入登入頁")
-        st.session_state.cookie_restore_done = True
-        return False
-
-    # === 使用 refresh_token 恢復 session ===
+    # 獲取 email 和 refresh_token
     email = auth_data.get("email")
     refresh_token = auth_data.get("refresh_token")
 
     if not email or not refresh_token:
-        st.session_state.cookie_restore_done = True
+        st.session_state.auth_restore_done = True
         return False
 
-    try:
-        response = requests.post(
-            f"{api_base_url}/auth/refresh",
-            json={"refresh_token": refresh_token},
-            timeout=10
-        )
+    # 調用 API 刷新 token
+    access_token = refresh_access_token(api_base_url, refresh_token)
 
-        if response.status_code == 200:
-            data = response.json()
-
-            # 恢復 session state
-            st.session_state.user_token = data["access_token"]
-            st.session_state.refresh_token = refresh_token
-            st.session_state.user_email = email
-            st.session_state.remember_me = True
-            st.session_state.cookie_restore_done = True
-
-            logger.info(f"Session 已從 {source} 恢復: {email}")
-            return True
-        else:
-            # Token 無效，清除存儲（同步清除，避免循環）
-            logger.info(f"Refresh token 已過期或無效（HTTP {response.status_code}），清除存儲")
-            _sync_clear_auth_storage()
-            st.session_state.cookie_restore_done = True
-            return False
-
-    except requests.exceptions.Timeout:
-        logger.warning("API 請求超時，進入登入頁")
-        st.session_state.cookie_restore_done = True
+    if access_token:
+        # 恢復成功
+        st.session_state.user_token = access_token
+        st.session_state.refresh_token = refresh_token
+        st.session_state.user_email = email
+        st.session_state.remember_me = True
+        st.session_state.auth_restore_done = True
+        logger.info(f"登入狀態已恢復: {email}")
+        return True
+    else:
+        # Token 過期或無效，清除存儲
+        logger.info("Refresh token 已過期，清除存儲")
+        clear_auth_data()
+        st.session_state.auth_restore_done = True
         return False
-    except requests.exceptions.ConnectionError:
-        logger.warning("無法連接伺服器，進入登入頁")
-        st.session_state.cookie_restore_done = True
-        return False
-    except Exception as e:
-        logger.warning(f"恢復 Session 失敗: {e}")
-        st.session_state.cookie_restore_done = True
-        return False
-
-
-def _sync_clear_auth_storage():
-    """
-    同步清除認證存儲（避免非同步問題導致循環）
-
-    與 clear_auth_storage() 的區別：
-    - 不使用 streamlit-js-eval（它是非同步的）
-    - 只清除 Cookie（同步）
-    - localStorage 會在下次登入時被覆蓋
-    """
-    try:
-        cookie_manager = _get_cookie_manager()
-        if cookie_manager:
-            cookie_manager.delete(COOKIE_NAME)
-            logger.info("Cookie 已同步清除")
-    except Exception as e:
-        logger.debug(f"Cookie 清除失敗: {e}")
 
 
 # ==================== 登入/登出 ====================
@@ -617,10 +370,6 @@ def _sync_clear_auth_storage():
 def login(api_base_url: str, email: str, password: str, remember_me: bool = False) -> Dict:
     """
     執行登入
-
-    改進點（v2.0）：
-    1. 成功後同時存入 localStorage 和 Cookie（雙重存儲）
-    2. 重置所有恢復狀態標記
 
     Args:
         api_base_url: API 基礎 URL
@@ -635,7 +384,7 @@ def login(api_base_url: str, email: str, password: str, remember_me: bool = Fals
         response = requests.post(
             f"{api_base_url}/auth/login",
             json={"email": email, "password": password},
-            timeout=10
+            timeout=15
         )
 
         if response.status_code == 200:
@@ -646,11 +395,11 @@ def login(api_base_url: str, email: str, password: str, remember_me: bool = Fals
             st.session_state.refresh_token = data["refresh_token"]
             st.session_state.user_email = email
             st.session_state.remember_me = remember_me
-            st.session_state.cookie_restore_done = True
+            st.session_state.auth_restore_done = True
 
-            # 如果勾選「記住我」，使用雙重存儲
+            # 如果勾選「記住我」，保存到持久化存儲
             if remember_me:
-                save_auth_dual(email, data["refresh_token"])
+                save_auth_data(email, data["refresh_token"])
 
             return {"success": True, "message": "登入成功"}
         else:
@@ -669,16 +418,10 @@ def logout(api_base_url: str):
     """
     登出
 
-    改進點（v2.0）：
-    1. 清除 localStorage
-    2. 清除 Cookie
-    3. 通知後端使 session 失效
-    4. 重置所有狀態標記
-
     Args:
         api_base_url: API 基礎 URL
     """
-    # 通知後端登出（使 session 失效）
+    # 通知後端登出
     if st.session_state.get('refresh_token'):
         try:
             requests.post(
@@ -687,10 +430,10 @@ def logout(api_base_url: str):
                 timeout=5
             )
         except Exception:
-            pass  # 即使後端通知失敗，也繼續清除本地狀態
+            pass
 
-    # 清除雙重存儲
-    clear_auth_storage()
+    # 清除持久化存儲
+    clear_auth_data()
 
     # 清除 session state
     st.session_state.user_token = None
@@ -699,9 +442,8 @@ def logout(api_base_url: str):
     st.session_state.user_id = None
     st.session_state.username = None
     st.session_state.remember_me = False
-    st.session_state.cookie_restore_attempts = 0
-    st.session_state.cookie_restore_done = False
-    st.session_state.visibility_listener_injected = False
+    st.session_state.auth_restore_done = False
+    st.session_state.auth_restore_attempts = 0
 
     st.success("已登出")
     st.rerun()
@@ -710,13 +452,7 @@ def logout(api_base_url: str):
 # ==================== UI 元件 ====================
 
 def get_user_info() -> Optional[Dict[str, str]]:
-    """
-    獲取當前用戶資訊
-
-    Returns:
-        Dict: 用戶資訊字典，包含 email, username, user_id
-        None: 未登入
-    """
+    """獲取當前用戶資訊"""
     if not is_authenticated():
         return None
 
@@ -738,7 +474,6 @@ def render_user_info_sidebar(api_base_url: str):
             if user_info['username']:
                 st.markdown(f"**用戶名**: {user_info['username']}")
 
-            # 顯示登入狀態
             if st.session_state.get('remember_me'):
                 st.caption("✅ 已啟用自動登入（7 天）")
 
@@ -749,15 +484,7 @@ def render_user_info_sidebar(api_base_url: str):
 
 
 def render_login_form(api_base_url: str) -> bool:
-    """
-    渲染登入表單
-
-    Args:
-        api_base_url: API 基礎 URL
-
-    Returns:
-        是否登入成功
-    """
+    """渲染登入表單"""
     st.markdown("#### 用戶登入")
 
     email = st.text_input("Email", key="login_email")
@@ -782,19 +509,63 @@ def render_login_form(api_base_url: str) -> bool:
     return False
 
 
+# ==================== 頁面可見性監聽（簡化版） ====================
+
+def inject_visibility_listener():
+    """
+    注入頁面可見性監聽器（v3.0 簡化版）
+
+    v3.0 改進：
+    - 不再依賴 localStorage（不可靠）
+    - 不再自動 reload（避免循環）
+    - 只記錄日誌，讓 Streamlit 的 15 秒自動刷新處理
+    """
+    # 已認證時才注入，避免在登入頁增加複雜度
+    if not is_authenticated():
+        return
+
+    # 只注入一次
+    if st.session_state.get('visibility_listener_injected'):
+        return
+
+    # 簡化版：只記錄可見性變化，不自動 reload
+    js_code = """
+    <script>
+    (function() {
+        if (window._v7_visibility_listener) return;
+        window._v7_visibility_listener = true;
+
+        document.addEventListener('visibilitychange', function() {
+            if (document.hidden) {
+                console.log('[V7] 頁面隱藏');
+            } else {
+                console.log('[V7] 頁面可見 - Streamlit 自動刷新會處理');
+            }
+        });
+
+        console.log('[V7] 可見性監聽器已安裝 (v3.0 簡化版)');
+    })();
+    </script>
+    """
+
+    components.html(js_code, height=0)
+    st.session_state.visibility_listener_injected = True
+
+
 # ==================== 載入中畫面 ====================
 
 def render_loading_screen():
     """渲染恢復登入狀態的載入畫面"""
-    st.markdown("""
+    attempts = st.session_state.get('auth_restore_attempts', 0)
+    st.markdown(f"""
     <div style="display: flex; justify-content: center; align-items: center; height: 200px;">
         <div style="text-align: center;">
             <div class="auth-spinner"></div>
-            <p style="color: #666; margin-top: 16px;">正在恢復登入狀態...</p>
+            <p style="color: #666; margin-top: 16px;">正在恢復登入狀態... ({attempts}/{MAX_RESTORE_ATTEMPTS})</p>
         </div>
     </div>
     <style>
-    .auth-spinner {
+    .auth-spinner {{
         width: 40px;
         height: 40px;
         border: 4px solid #f3f3f3;
@@ -802,10 +573,10 @@ def render_loading_screen():
         border-radius: 50%;
         animation: auth-spin 1s linear infinite;
         margin: 0 auto;
-    }
-    @keyframes auth-spin {
-        0% { transform: rotate(0deg); }
-        100% { transform: rotate(360deg); }
-    }
+    }}
+    @keyframes auth-spin {{
+        0% {{ transform: rotate(0deg); }}
+        100% {{ transform: rotate(360deg); }}
+    }}
     </style>
     """, unsafe_allow_html=True)
