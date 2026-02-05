@@ -337,6 +337,10 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
     # 取得分析時間（顯示於訊號盒中，避免用戶誤判訊號時效性）
     analysis_time_str = result.get('analysis_time', '')
 
+    # 檢查是否在訊號保存窗口內（09:00-09:30）
+    in_window = result.get('dual_strategy_in_window', True)
+    window_warning = "" if in_window else '<p style="font-size:11px;color:#ff9800;font-weight:bold;">⚠️ 窗口外（僅供參考，不保存）</p>'
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -358,6 +362,7 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <p>勝率: {original.get('win_rate', 0):.1%}</p>
                 <p>樣本: {original.get('samples', 0)} 筆</p>
                 <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
+                {window_warning}
             </div>
             """, unsafe_allow_html=True)
         else:
@@ -366,6 +371,7 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <h2>⚪ 無訊號</h2>
                 <p>分數: {score} {change_icon} ({score_change:+d})</p>
                 <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
+                {window_warning}
             </div>
             """, unsafe_allow_html=True)
 
@@ -394,6 +400,7 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <p>勝率: {optimized.get('win_rate', 0):.1%}</p>
                 <p>樣本: {optimized.get('samples', 0)} 筆</p>
                 <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
+                {window_warning}
             </div>
             """, unsafe_allow_html=True)
         else:
@@ -402,6 +409,7 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <h2>⚪ 無訊號</h2>
                 <p>分數: {score} {change_icon} ({score_change:+d})</p>
                 <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
+                {window_warning}
             </div>
             """, unsafe_allow_html=True)
 
@@ -421,6 +429,10 @@ def render_intraday_status(result: Dict, prev_scores: Dict):
 
     # 取得分析時間
     analysis_time_str = result.get('analysis_time', '')
+
+    # 檢查是否在訊號保存窗口內（09:00-13:25）
+    in_window = result.get('intraday_in_window', True)
+    window_warning = "" if in_window else '<p style="font-size:11px;color:#ff9800;font-weight:bold;">⚠️ 窗口外（僅供參考，不保存）</p>'
 
     has_signal = intraday.get('has_signal', False)
     best_score = intraday.get('best_score', 0)
@@ -445,6 +457,7 @@ def render_intraday_status(result: Dict, prev_scores: Dict):
             <h2>🟡 盤中動態 — {dir_icon}</h2>
             <p>最佳進場時間: {best_entry_time} | 分數: {best_score} {change_icon} ({score_change:+d}){matched_info}</p>
             <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
+            {window_warning}
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -453,6 +466,7 @@ def render_intraday_status(result: Dict, prev_scores: Dict):
             <h2>⚪ 盤中無訊號</h2>
             <p>最高分數: {best_score} {change_icon} ({score_change:+d})</p>
             <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
+            {window_warning}
         </div>
         """, unsafe_allow_html=True)
 
