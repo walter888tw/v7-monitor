@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 # 導入認證和 API 客戶端
 from utils.auth import (
     init_session, is_authenticated, render_user_info_sidebar,
-    try_restore_session, login
+    try_restore_session, login, inject_visibility_listener,
+    render_loading_screen
 )
 from utils.api_client import APIClient
 
@@ -938,16 +939,29 @@ def v7_monitor_page():
 
 # ==================== 主程式 ====================
 def main():
-    """主程式入口"""
+    """
+    主程式入口
+
+    認證流程（v2.0）：
+    1. 初始化 session state
+    2. 注入頁面可見性監聽器（解決手機切換 app 後登出問題）
+    3. 智能恢復登入狀態（指數退避 + 多源讀取）
+    4. 顯示對應頁面
+    """
     init_session()
 
-    # 嘗試從 Cookie 恢復登入狀態（解決 Streamlit session 斷線問題）
-    # 如果正在恢復中，try_restore_session 會處理 rerun
+    # 注入頁面可見性監聽器（解決手機切換 app 後登出問題）
+    # 當用戶從其他 app 切回且隱藏時間超過 30 秒，會觸發頁面重載
+    inject_visibility_listener()
+
+    # 智能恢復登入狀態（指數退避 + 多源讀取）
+    # 優先從 localStorage 讀取，回退到 Cookie
     restored = try_restore_session(API_BASE_URL)
 
     # 檢查是否正在恢復中（尚未完成恢復流程）
     if not st.session_state.get('cookie_restore_done', False):
-        # 正在恢復中，頁面會 rerun，不要顯示任何內容
+        # 顯示載入畫面
+        render_loading_screen()
         return
 
     # 檢查登入狀態

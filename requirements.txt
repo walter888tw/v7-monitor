@@ -17,3 +17,6 @@ PyJWT>=2.8.0
 # Cookie 持久化（解決 Streamlit session 斷線問題）
 extra-streamlit-components>=0.1.60
 
+# JavaScript Bridge（localStorage 讀寫，比 CookieManager 更可靠）
+streamlit-js-eval>=0.1.7
+
