@@ -942,7 +942,13 @@ def main():
     init_session()
 
     # 嘗試從 Cookie 恢復登入狀態（解決 Streamlit session 斷線問題）
-    try_restore_session(API_BASE_URL)
+    # 如果正在恢復中，try_restore_session 會處理 rerun
+    restored = try_restore_session(API_BASE_URL)
+
+    # 檢查是否正在恢復中（尚未完成恢復流程）
+    if not st.session_state.get('cookie_restore_done', False):
+        # 正在恢復中，頁面會 rerun，不要顯示任何內容
+        return
 
     # 檢查登入狀態
     if not is_authenticated():

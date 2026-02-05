@@ -180,7 +180,8 @@ def try_restore_session(api_base_url: str) -> bool:
 
     重要：CookieManager 是非同步的，需要多次嘗試
     - 第一次頁面載入時，Cookie 可能還沒準備好
-    - 給予最多 2 次 rerun 機會來讀取 Cookie
+    - 手機切換 app 回來時，瀏覽器需要更多時間恢復
+    - 給予最多 4 次 rerun 機會來讀取 Cookie
 
     流程：
     1. 檢查是否已經認證（避免重複）
@@ -195,6 +196,8 @@ def try_restore_session(api_base_url: str) -> bool:
     Returns:
         是否成功恢復登入
     """
+    import time as pytime
+
     # 如果已經登入，不需要恢復
     if is_authenticated():
         st.session_state.cookie_restore_done = True
@@ -208,20 +211,27 @@ def try_restore_session(api_base_url: str) -> bool:
     attempts = st.session_state.get('cookie_restore_attempts', 0)
     st.session_state.cookie_restore_attempts = attempts + 1
 
+    # 最大嘗試次數（手機需要更多時間）
+    MAX_ATTEMPTS = 4
+
     # 從 Cookie 載入認證資訊
     auth_data = load_auth_cookie()
 
     # CookieManager 是非同步的，第一次可能讀不到
-    # 給予最多 2 次 rerun 機會
+    # 給予最多 MAX_ATTEMPTS 次 rerun 機會
     if auth_data is None:
-        if attempts < 2:
-            # 還有嘗試機會，觸發 rerun 讓 CookieManager 有時間初始化
-            # 使用 st.empty() 避免干擾頁面
-            logger.info(f"Cookie 讀取嘗試 {attempts + 1}/2，等待 CookieManager 初始化...")
+        if attempts < MAX_ATTEMPTS:
+            # 顯示恢復中提示（僅在前幾次嘗試時顯示）
+            if attempts >= 1:
+                st.info("🔄 正在恢復登入狀態，請稍候...")
+                # 給瀏覽器一點時間來初始化 Cookie
+                pytime.sleep(0.3)
+
+            logger.info(f"Cookie 讀取嘗試 {attempts + 1}/{MAX_ATTEMPTS}，等待 CookieManager 初始化...")
             st.rerun()
             return False
         else:
-            # 已經嘗試 2 次，放棄恢復
+            # 已經嘗試 MAX_ATTEMPTS 次，放棄恢復
             st.session_state.cookie_restore_done = True
             logger.info("Cookie 恢復失敗：超過最大嘗試次數")
             return False
