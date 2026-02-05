@@ -986,27 +986,27 @@ def main():
     """
     主程式入口
 
-    認證流程（v2.0）：
+    認證流程（v2.1 簡化版）：
     1. 初始化 session state
-    2. 注入頁面可見性監聽器（解決手機切換 app 後登出問題）
-    3. 智能恢復登入狀態（指數退避 + 多源讀取）
+    2. 嘗試恢復登入狀態（單次嘗試，不循環）
+    3. 注入頁面可見性監聽器
     4. 顯示對應頁面
+
+    v2.1 改進（2026-02-05）：
+    - 移除載入畫面等待（避免無限卡住）
+    - 簡化恢復邏輯（單次嘗試，失敗直接進登入頁）
+    - 修正「網站轉向太多次」問題
     """
     init_session()
 
-    # 注入頁面可見性監聽器（解決手機切換 app 後登出問題）
-    # 當用戶從其他 app 切回且隱藏時間超過 30 秒，會觸發頁面重載
+    # 嘗試恢復登入狀態（單次嘗試，不會無限循環）
+    try_restore_session(API_BASE_URL)
+
+    # 標記恢復完成（無論成功與否）
+    st.session_state.cookie_restore_done = True
+
+    # 注入頁面可見性監聽器（在恢復完成後注入）
     inject_visibility_listener()
-
-    # 智能恢復登入狀態（指數退避 + 多源讀取）
-    # 優先從 localStorage 讀取，回退到 Cookie
-    restored = try_restore_session(API_BASE_URL)
-
-    # 檢查是否正在恢復中（尚未完成恢復流程）
-    if not st.session_state.get('cookie_restore_done', False):
-        # 顯示載入畫面
-        render_loading_screen()
-        return
 
     # 檢查登入狀態
     if not is_authenticated():

@@ -40,9 +40,10 @@ logger = logging.getLogger(__name__)
 COOKIE_NAME = "v7_auth"  # Cookie 名稱（與 V5 區分）
 LOCALSTORAGE_KEY = "v7_auth_data"  # localStorage 鍵名
 COOKIE_EXPIRY_DAYS = 7  # Cookie 過期天數（與 Refresh Token 同步）
-MAX_RESTORE_ATTEMPTS = 5  # 最大恢復嘗試次數
-BACKOFF_TIMES = [0, 0.2, 0.5, 1.0, 2.0]  # 指數退避時間（秒）
-VISIBILITY_HIDDEN_THRESHOLD = 30000  # 頁面隱藏超過此毫秒數觸發重載
+# v2.1: 簡化重試機制，避免無限循環
+MAX_RESTORE_ATTEMPTS = 2  # 最大恢復嘗試次數（減少，避免循環）
+BACKOFF_TIMES = [0, 0.5]  # 簡化退避時間
+VISIBILITY_HIDDEN_THRESHOLD = 60000  # 頁面隱藏超過此毫秒數觸發重載（增加到 60 秒）
 
 # 全局 CookieManager 實例（單例）
 _cookie_manager = None
@@ -314,13 +315,12 @@ def clear_auth_storage():
 
 def inject_visibility_listener():
     """
-    注入頁面可見性監聽器
+    注入頁面可見性監聯器（v2.1 簡化版）
 
-    當用戶從其他 app 切回時（visibilitychange 事件），
-    如果隱藏時間超過閾值，主動觸發頁面重新載入，
-    確保 Streamlit 執行恢復邏輯
-
-    這是解決手機切換 app 後登出問題的關鍵！
+    v2.1 改進（2026-02-05）：
+    - 增加 reload 次數限制，防止無限循環
+    - 增加閾值到 60 秒（原 30 秒太敏感）
+    - 增加防護機制
     """
     # 只注入一次
     if st.session_state.get('visibility_listener_injected'):
@@ -336,6 +336,29 @@ def inject_visibility_listener():
         // 記錄最後活動時間
         let lastActiveTime = Date.now();
 
+        // 防止無限 reload 的計數器（存在 sessionStorage，頁面關閉就重置）
+        const RELOAD_COUNT_KEY = 'v7_reload_count';
+        const MAX_RELOADS = 2;  // 最多連續 reload 2 次
+
+        function getReloadCount() {{
+            return parseInt(sessionStorage.getItem(RELOAD_COUNT_KEY) || '0', 10);
+        }}
+
+        function incrementReloadCount() {{
+            const count = getReloadCount() + 1;
+            sessionStorage.setItem(RELOAD_COUNT_KEY, count.toString());
+            return count;
+        }}
+
+        function resetReloadCount() {{
+            sessionStorage.removeItem(RELOAD_COUNT_KEY);
+        }}
+
+        // 頁面載入後 10 秒重置計數器（正常使用）
+        setTimeout(function() {{
+            resetReloadCount();
+        }}, 10000);
+
         document.addEventListener('visibilitychange', function() {{
             if (document.hidden) {{
                 // 頁面隱藏，記錄時間
@@ -346,24 +369,23 @@ def inject_visibility_listener():
                 const hiddenDuration = Date.now() - lastActiveTime;
                 console.log('[V7 Auth] 頁面可見，隱藏時長: ' + hiddenDuration + 'ms');
 
-                // 如果隱藏超過閾值，觸發重新載入以恢復 session
+                // 防護：檢查是否已經 reload 太多次
+                const reloadCount = getReloadCount();
+                if (reloadCount >= MAX_RELOADS) {{
+                    console.log('[V7 Auth] 已達 reload 上限，停止 reload');
+                    return;
+                }}
+
+                // 如果隱藏超過閾值，觸發重新載入
                 if (hiddenDuration > {VISIBILITY_HIDDEN_THRESHOLD}) {{
-                    console.log('[V7 Auth] 隱藏超過 {VISIBILITY_HIDDEN_THRESHOLD/1000} 秒，觸發重新載入');
-                    // 標記需要恢復（可選，用於調試）
-                    localStorage.setItem('v7_need_restore', 'true');
-                    // 重新載入頁面
+                    console.log('[V7 Auth] 隱藏超過 {VISIBILITY_HIDDEN_THRESHOLD // 1000} 秒，觸發重新載入');
+                    incrementReloadCount();
                     window.location.reload();
                 }}
             }}
         }});
 
-        // 檢查是否需要恢復（由上一次 reload 觸發）
-        if (localStorage.getItem('v7_need_restore') === 'true') {{
-            localStorage.removeItem('v7_need_restore');
-            console.log('[V7 Auth] 頁面已重載，執行登入恢復');
-        }}
-
-        console.log('[V7 Auth] 可見性監聽器已安裝');
+        console.log('[V7 Auth] 可見性監聽器已安裝 (v2.1)');
     }})();
     </script>
     """
@@ -463,19 +485,18 @@ def refresh_access_token(api_base_url: str) -> bool:
 
 def try_restore_session(api_base_url: str) -> bool:
     """
-    智能恢復登入狀態（指數退避 + 多源讀取）
+    恢復登入狀態（v2.1 簡化版，避免無限循環）
+
+    v2.1 改進（2026-02-05）：
+    - 移除複雜的重試循環，改用單次嘗試
+    - 如果讀不到或失敗，直接進入登入頁（不 rerun）
+    - 避免「網站轉向太多次」錯誤
 
     策略：
-    1. 優先從 localStorage 讀取（更可靠，使用 streamlit-js-eval）
-    2. 回退到 Cookie 讀取（CookieManager，作為備援）
-    3. 使用指數退避重試（最多 5 次，間隔遞增）
-    4. 成功讀取後使用 refresh_token 獲取新的 access_token
-
-    流程：
-    1. 檢查是否已經認證（避免重複）
-    2. 檢查是否已完成恢復流程
-    3. 多源讀取認證資料
-    4. 使用 refresh_token 恢復 session
+    1. 只嘗試一次讀取（localStorage → Cookie）
+    2. 如果讀到有效 token，嘗試 refresh
+    3. 成功就恢復，失敗就進入登入頁
+    4. 絕不觸發無限 rerun
 
     Args:
         api_base_url: API 基礎 URL
@@ -483,8 +504,6 @@ def try_restore_session(api_base_url: str) -> bool:
     Returns:
         是否成功恢復登入
     """
-    import time as pytime
-
     # 如果已經登入，不需要恢復
     if is_authenticated():
         st.session_state.cookie_restore_done = True
@@ -494,23 +513,21 @@ def try_restore_session(api_base_url: str) -> bool:
     if st.session_state.get('cookie_restore_done'):
         return False
 
-    # 取得當前嘗試次數
+    # 記錄嘗試次數（用於調試）
     attempts = st.session_state.get('cookie_restore_attempts', 0)
     st.session_state.cookie_restore_attempts = attempts + 1
 
-    # 等待（第一次不等待，之後指數退避）
-    if attempts > 0 and attempts < len(BACKOFF_TIMES):
-        wait_time = BACKOFF_TIMES[attempts]
-        if wait_time > 0:
-            # 顯示恢復中提示
-            st.info(f"🔄 正在恢復登入狀態... ({attempts}/{MAX_RESTORE_ATTEMPTS})")
-            pytime.sleep(wait_time)
+    # 防止無限循環：超過 2 次直接放棄
+    if attempts >= MAX_RESTORE_ATTEMPTS:
+        logger.warning(f"恢復嘗試已達上限 ({MAX_RESTORE_ATTEMPTS})，放棄恢復")
+        st.session_state.cookie_restore_done = True
+        return False
 
-    # === 多源讀取策略 ===
+    # === 多源讀取（單次嘗試，不重試） ===
     auth_data = None
     source = None
 
-    # 嘗試 1: localStorage（優先，更可靠）
+    # 嘗試 1: localStorage（優先）
     auth_data = load_auth_from_localstorage()
     if auth_data:
         source = "localStorage"
@@ -523,16 +540,11 @@ def try_restore_session(api_base_url: str) -> bool:
             source = "Cookie"
             logger.info("從 Cookie 讀取成功")
 
-    # 如果都讀不到，繼續重試
+    # 如果都讀不到，直接完成（不重試，避免循環）
     if auth_data is None:
-        if attempts < MAX_RESTORE_ATTEMPTS:
-            logger.info(f"嘗試 {attempts + 1}/{MAX_RESTORE_ATTEMPTS} 失敗，繼續重試...")
-            st.rerun()
-            return False
-        else:
-            st.session_state.cookie_restore_done = True
-            logger.info("認證恢復失敗：超過最大嘗試次數")
-            return False
+        logger.info("無法讀取認證資料，進入登入頁")
+        st.session_state.cookie_restore_done = True
+        return False
 
     # === 使用 refresh_token 恢復 session ===
     email = auth_data.get("email")
@@ -562,30 +574,42 @@ def try_restore_session(api_base_url: str) -> bool:
             logger.info(f"Session 已從 {source} 恢復: {email}")
             return True
         else:
-            # Token 無效，清除存儲
+            # Token 無效，清除存儲（同步清除，避免循環）
             logger.info(f"Refresh token 已過期或無效（HTTP {response.status_code}），清除存儲")
-            clear_auth_storage()
+            _sync_clear_auth_storage()
             st.session_state.cookie_restore_done = True
             return False
 
     except requests.exceptions.Timeout:
-        logger.warning("API 請求超時")
-        if attempts < MAX_RESTORE_ATTEMPTS:
-            st.rerun()
-            return False
+        logger.warning("API 請求超時，進入登入頁")
         st.session_state.cookie_restore_done = True
         return False
     except requests.exceptions.ConnectionError:
-        logger.warning("無法連接伺服器")
-        if attempts < MAX_RESTORE_ATTEMPTS:
-            st.rerun()
-            return False
+        logger.warning("無法連接伺服器，進入登入頁")
         st.session_state.cookie_restore_done = True
         return False
     except Exception as e:
         logger.warning(f"恢復 Session 失敗: {e}")
         st.session_state.cookie_restore_done = True
         return False
+
+
+def _sync_clear_auth_storage():
+    """
+    同步清除認證存儲（避免非同步問題導致循環）
+
+    與 clear_auth_storage() 的區別：
+    - 不使用 streamlit-js-eval（它是非同步的）
+    - 只清除 Cookie（同步）
+    - localStorage 會在下次登入時被覆蓋
+    """
+    try:
+        cookie_manager = _get_cookie_manager()
+        if cookie_manager:
+            cookie_manager.delete(COOKIE_NAME)
+            logger.info("Cookie 已同步清除")
+    except Exception as e:
+        logger.debug(f"Cookie 清除失敗: {e}")
 
 
 # ==================== 登入/登出 ====================
