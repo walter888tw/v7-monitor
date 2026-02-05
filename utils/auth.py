@@ -3,10 +3,11 @@
 認證工具模組
 提供 JWT 認證相關功能 + Cookie 持久化登入
 
-重構說明（2026-02-04）：
-- 新增 Cookie 持久化功能，解決 Streamlit session 斷線問題
-- 支援「記住我」選項，讓用戶選擇是否持久化登入
-- Cookie 儲存 refresh_token，頁面載入時自動恢復登入狀態
+重構說明（2026-02-05）：
+- 修復 F5 刷新後跳登入頁的問題
+- CookieManager 是非同步的，需要等待頁面渲染後才能讀取
+- 使用 session_state 追蹤 Cookie 初始化狀態
+- 給予 Cookie 讀取最多 2 次 rerun 機會
 """
 import streamlit as st
 import requests
@@ -21,17 +22,26 @@ logger = logging.getLogger(__name__)
 COOKIE_NAME = "v7_auth"  # Cookie 名稱（與 V5 區分）
 COOKIE_EXPIRY_DAYS = 7   # Cookie 過期天數（與 Refresh Token 同步）
 
+# 全局 CookieManager 實例（單例）
+_cookie_manager = None
+
 
 def _get_cookie_manager():
     """
-    獲取 Cookie Manager 實例
+    獲取 Cookie Manager 實例（單例模式）
 
     使用 extra-streamlit-components 套件
-    注意：每個頁面只能有一個 CookieManager 實例
+    注意：CookieManager 是非同步的，需要等待頁面渲染
     """
+    global _cookie_manager
+    if _cookie_manager is not None:
+        return _cookie_manager
+
     try:
         from extra_streamlit_components import CookieManager
-        return CookieManager()
+        # 使用固定的 key 避免重複創建
+        _cookie_manager = CookieManager(key="v7_cookie_manager")
+        return _cookie_manager
     except ImportError:
         logger.warning("extra-streamlit-components 未安裝，Cookie 持久化功能將不可用")
         return None
@@ -54,8 +64,11 @@ def init_session():
         st.session_state.username = None
     if 'remember_me' not in st.session_state:
         st.session_state.remember_me = False
-    if 'cookie_checked' not in st.session_state:
-        st.session_state.cookie_checked = False
+    # Cookie 恢復相關狀態
+    if 'cookie_restore_attempts' not in st.session_state:
+        st.session_state.cookie_restore_attempts = 0
+    if 'cookie_restore_done' not in st.session_state:
+        st.session_state.cookie_restore_done = False
 
 
 def is_authenticated() -> bool:
@@ -114,6 +127,8 @@ def load_auth_cookie() -> Optional[Dict]:
     """
     從 Cookie 載入認證資訊
 
+    注意：CookieManager 是非同步的，第一次呼叫可能返回 None
+
     Returns:
         認證資訊字典 {"email": str, "refresh_token": str}
         如果沒有有效 Cookie 則返回 None
@@ -123,7 +138,7 @@ def load_auth_cookie() -> Optional[Dict]:
         if cookie_manager is None:
             return None
 
-        # 讀取 Cookie
+        # 讀取 Cookie（非同步，可能需要等待）
         cookie_value = cookie_manager.get(COOKIE_NAME)
         if not cookie_value:
             return None
@@ -163,11 +178,16 @@ def try_restore_session(api_base_url: str) -> bool:
     """
     嘗試從 Cookie 恢復登入狀態
 
+    重要：CookieManager 是非同步的，需要多次嘗試
+    - 第一次頁面載入時，Cookie 可能還沒準備好
+    - 給予最多 2 次 rerun 機會來讀取 Cookie
+
     流程：
     1. 檢查是否已經認證（避免重複）
-    2. 從 Cookie 讀取 refresh_token
-    3. 使用 refresh_token 獲取新的 access_token
-    4. 恢復 session state
+    2. 檢查是否已完成 Cookie 恢復流程
+    3. 從 Cookie 讀取 refresh_token
+    4. 使用 refresh_token 獲取新的 access_token
+    5. 恢復 session state
 
     Args:
         api_base_url: API 基礎 URL
@@ -175,25 +195,43 @@ def try_restore_session(api_base_url: str) -> bool:
     Returns:
         是否成功恢復登入
     """
-    # 避免重複檢查
-    if st.session_state.get('cookie_checked'):
-        return is_authenticated()
-
-    st.session_state.cookie_checked = True
-
     # 如果已經登入，不需要恢復
     if is_authenticated():
+        st.session_state.cookie_restore_done = True
         return True
+
+    # 如果已經完成 Cookie 恢復流程（無論成功與否）
+    if st.session_state.get('cookie_restore_done'):
+        return False
+
+    # 增加嘗試次數
+    attempts = st.session_state.get('cookie_restore_attempts', 0)
+    st.session_state.cookie_restore_attempts = attempts + 1
 
     # 從 Cookie 載入認證資訊
     auth_data = load_auth_cookie()
-    if not auth_data:
-        return False
 
+    # CookieManager 是非同步的，第一次可能讀不到
+    # 給予最多 2 次 rerun 機會
+    if auth_data is None:
+        if attempts < 2:
+            # 還有嘗試機會，觸發 rerun 讓 CookieManager 有時間初始化
+            # 使用 st.empty() 避免干擾頁面
+            logger.info(f"Cookie 讀取嘗試 {attempts + 1}/2，等待 CookieManager 初始化...")
+            st.rerun()
+            return False
+        else:
+            # 已經嘗試 2 次，放棄恢復
+            st.session_state.cookie_restore_done = True
+            logger.info("Cookie 恢復失敗：超過最大嘗試次數")
+            return False
+
+    # 成功讀取到 Cookie
     email = auth_data.get("email")
     refresh_token = auth_data.get("refresh_token")
 
     if not email or not refresh_token:
+        st.session_state.cookie_restore_done = True
         return False
 
     # 使用 refresh_token 獲取新的 access_token
@@ -212,6 +250,7 @@ def try_restore_session(api_base_url: str) -> bool:
             st.session_state.refresh_token = refresh_token
             st.session_state.user_email = email
             st.session_state.remember_me = True
+            st.session_state.cookie_restore_done = True
 
             logger.info(f"Session 已從 Cookie 恢復: {email}")
             return True
@@ -219,10 +258,12 @@ def try_restore_session(api_base_url: str) -> bool:
             # Refresh token 已過期或無效，清除 Cookie
             logger.info("Refresh token 已過期，清除 Cookie")
             clear_auth_cookie()
+            st.session_state.cookie_restore_done = True
             return False
 
     except Exception as e:
         logger.warning(f"恢復 Session 失敗: {e}")
+        st.session_state.cookie_restore_done = True
         return False
 
 
@@ -254,6 +295,7 @@ def login(api_base_url: str, email: str, password: str, remember_me: bool = Fals
             st.session_state.refresh_token = data["refresh_token"]
             st.session_state.user_email = email
             st.session_state.remember_me = remember_me
+            st.session_state.cookie_restore_done = True
 
             # 如果勾選「記住我」，儲存到 Cookie
             if remember_me:
@@ -295,7 +337,8 @@ def logout(api_base_url: str):
     st.session_state.user_id = None
     st.session_state.username = None
     st.session_state.remember_me = False
-    st.session_state.cookie_checked = False
+    st.session_state.cookie_restore_attempts = 0
+    st.session_state.cookie_restore_done = False
 
     st.success("已登出")
     st.rerun()
