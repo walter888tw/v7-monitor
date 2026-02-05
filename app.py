@@ -339,7 +339,16 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
 
     # 檢查是否在訊號保存窗口內（09:00-09:30）
     in_window = result.get('dual_strategy_in_window', True)
-    window_warning = "" if in_window else '<p style="font-size:11px;color:#ff9800;font-weight:bold;">⚠️ 窗口外（僅供參考，不保存）</p>'
+
+    # 根據當前時間決定窗口狀態訊息
+    now = get_taiwan_now()
+    current_time = now.time()
+    if current_time < SIGNAL_WINDOW_START:
+        window_status_msg = f"⏰ 訊號窗口 {SIGNAL_WINDOW_START.strftime('%H:%M')} 開始"
+    elif current_time > SIGNAL_WINDOW_END:
+        window_status_msg = "✅ 今日訊號窗口已結束"
+    else:
+        window_status_msg = ""
 
     col1, col2 = st.columns(2)
 
@@ -354,7 +363,16 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
         score_change = score - prev_scores.get('original', 0)
         change_icon = "↗️" if score_change > 0 else ("↘️" if score_change < 0 else "→")
 
-        if matched:
+        # 非窗口時間：不顯示訊號方向，僅顯示窗口狀態
+        if not in_window:
+            st.markdown(f"""
+            <div class="signal-box signal-none">
+                <h2>{window_status_msg}</h2>
+                <p style="font-size:14px;color:#666;">訊號窗口: {SIGNAL_WINDOW_START.strftime('%H:%M')}-{SIGNAL_WINDOW_END.strftime('%H:%M')}</p>
+                <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        elif matched:
             st.markdown(f"""
             <div class="signal-box signal-{'call' if direction == 'CALL' else 'put'}">
                 <h2>{'🟢 CALL' if direction == 'CALL' else '🔴 PUT'}</h2>
@@ -362,7 +380,6 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <p>勝率: {original.get('win_rate', 0):.1%}</p>
                 <p>樣本: {original.get('samples', 0)} 筆</p>
                 <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
-                {window_warning}
             </div>
             """, unsafe_allow_html=True)
         else:
@@ -371,7 +388,6 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <h2>⚪ 無訊號</h2>
                 <p>分數: {score} {change_icon} ({score_change:+d})</p>
                 <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
-                {window_warning}
             </div>
             """, unsafe_allow_html=True)
 
@@ -392,7 +408,16 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
         score_change = score - prev_scores.get('optimized', 0)
         change_icon = "↗️" if score_change > 0 else ("↘️" if score_change < 0 else "→")
 
-        if matched:
+        # 非窗口時間：不顯示訊號方向，僅顯示窗口狀態
+        if not in_window:
+            st.markdown(f"""
+            <div class="signal-box signal-none">
+                <h2>{window_status_msg}</h2>
+                <p style="font-size:14px;color:#666;">訊號窗口: {SIGNAL_WINDOW_START.strftime('%H:%M')}-{SIGNAL_WINDOW_END.strftime('%H:%M')}</p>
+                <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        elif matched:
             st.markdown(f"""
             <div class="signal-box signal-{'call' if direction == 'CALL' else 'put'}">
                 <h2>{'🟢 CALL' if direction == 'CALL' else '🔴 PUT'}</h2>
@@ -400,7 +425,6 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <p>勝率: {optimized.get('win_rate', 0):.1%}</p>
                 <p>樣本: {optimized.get('samples', 0)} 筆</p>
                 <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
-                {window_warning}
             </div>
             """, unsafe_allow_html=True)
         else:
@@ -409,7 +433,6 @@ def render_dual_strategy_status(result: Dict, prev_scores: Dict):
                 <h2>⚪ 無訊號</h2>
                 <p>分數: {score} {change_icon} ({score_change:+d})</p>
                 <p style="font-size:12px;opacity:0.7;">分析時間: {analysis_time_str}</p>
-                {window_warning}
             </div>
             """, unsafe_allow_html=True)
 
@@ -655,8 +678,15 @@ def render_signal_history():
                         st.write("🔴 PUT")
                 with col4:
                     score = signal.get('score', 0)
+                    previous_score = signal.get('previous_score')
                     win_rate = signal.get('win_rate', 0)
-                    st.write(f"分數: {score} | 勝率: {win_rate:.1%}")
+                    # 如果有上次分數，顯示分數變化
+                    if previous_score is not None and previous_score != score:
+                        score_change = score - previous_score
+                        change_icon = "↗️" if score_change > 0 else "↘️"
+                        st.write(f"分數: {score} {change_icon} (上次: {previous_score}) | 勝率: {win_rate:.1%}")
+                    else:
+                        st.write(f"分數: {score} | 勝率: {win_rate:.1%}")
         else:
             st.info("今日尚無訊號記錄")
 
