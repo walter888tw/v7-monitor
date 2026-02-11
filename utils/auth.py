@@ -231,18 +231,19 @@ def verify_session(api_base_url: str, session_id: str) -> Optional[Dict]:
 
 def try_restore_session(api_base_url: str) -> bool:
     """
-    嘗試恢復登入狀態（v4.0）
+    嘗試恢復登入狀態（v4.1 安全增強版）
 
-    流程：
-    1. 檢查是否已登入 → 直接返回
-    2. 讀取 session_id（URL 參數或 Cookie）
-    3. 調用 /verify-session API
-    4. 恢復 session state
+    流程（三層驗證）：
+    1. 檢查 st.session_state 中是否有 user_token
+    2. 如果有，比對 session_state 中的 session_id 和 cookie 中的 session_id
+       - 一致 → 快速返回（不調用 API，避免頻繁登出）
+       - 不一致 → 可能被污染，清空後重新驗證
+    3. 如果沒有 user_token，讀取 cookie/URL 中的 session_id 並調用 API 驗證
 
-    設計原則：
-    - 單次 API 調用，不重試
-    - 失敗直接進入登入頁
-    - 極簡邏輯，減少出錯點
+    安全保證：
+    - 防止 session_state 被污染導致身份混淆
+    - 避免頻繁 API 調用影響用戶體驗
+    - 只有身份不一致時才強制重新驗證
 
     Args:
         api_base_url: API 基礎 URL
@@ -250,16 +251,32 @@ def try_restore_session(api_base_url: str) -> bool:
     Returns:
         是否成功恢復
     """
-    # 如果已經登入，不需要恢復
-    if is_authenticated():
-        st.session_state.auth_restore_done = True
-        return True
-
-    # 如果已完成恢復流程
+    # 如果已完成恢復流程（避免重複執行）
     if st.session_state.get('auth_restore_done'):
-        return False
+        return st.session_state.get('user_token') is not None
 
-    # 讀取 Session ID
+    # 第一層：檢查是否已有 token
+    if is_authenticated():
+        # 第二層：驗證 session_id 一致性（防止污染）
+        stored_sid = st.session_state.get('session_id')
+        current_sid = load_session_id()
+
+        if stored_sid and current_sid and stored_sid == current_sid:
+            # ✅ 身份一致，快速返回（不調用 API）
+            logger.info(f"身份驗證通過（快速路徑）: {st.session_state.get('user_email', 'N/A')}")
+            st.session_state.auth_restore_done = True
+            return True
+        else:
+            # ⚠️ 身份不一致，可能被污染
+            logger.warning(f"Session ID 不一致！stored={stored_sid[:8] if stored_sid else 'None'}..., current={current_sid[:8] if current_sid else 'None'}...")
+            logger.warning("清空 session_state 並重新驗證")
+            # 清空可能被污染的狀態
+            for key in ['user_token', 'session_id', 'user_email', 'username', 'subscription_tier', 'refresh_token']:
+                if key in st.session_state:
+                    del st.session_state[key]
+            # 繼續執行下方的重新驗證流程
+
+    # 第三層：讀取 Session ID 並調用 API 驗證
     session_id = load_session_id()
 
     if not session_id:
@@ -268,6 +285,7 @@ def try_restore_session(api_base_url: str) -> bool:
         return False
 
     # 調用後端驗證
+    logger.info(f"調用 /verify-session API (sid={session_id[:8]}...)")
     result = verify_session(api_base_url, session_id)
 
     if result:
@@ -279,11 +297,11 @@ def try_restore_session(api_base_url: str) -> bool:
         st.session_state.subscription_tier = result["user"].get("subscription_tier")
         st.session_state.remember_me = True
         st.session_state.auth_restore_done = True
-        logger.info(f"登入狀態已恢復: {result['user']['email']}")
+        logger.info(f"✅ 登入狀態已恢復: {result['user']['email']}")
         return True
     else:
         # 驗證失敗，清除存儲
-        logger.info("Session 驗證失敗，清除存儲")
+        logger.warning("❌ Session 驗證失敗，清除存儲")
         clear_session_id()
         st.session_state.auth_restore_done = True
         return False

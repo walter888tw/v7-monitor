@@ -863,6 +863,13 @@ def v7_monitor_page():
     # 標題
     st.title("📡 V7 即時監控系統")
 
+    # 身份確認提示（防止身份混淆）
+    user_email = st.session_state.get('user_email', '')
+    username = st.session_state.get('username', '')
+    if user_email:
+        display_name = username if username else user_email.split('@')[0]
+        st.caption(f"👤 歡迎回來，**{display_name}**")
+
     # 側邊欄顯示用戶資訊
     render_user_info_sidebar(API_BASE_URL)
 
