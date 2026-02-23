@@ -100,65 +100,88 @@ def get_headers() -> Dict[str, str]:
 
 def save_session_id(session_id: str):
     """
-    保存 Session ID（v4.0）
+    保存 Session ID（v4.2 安全修復版）
 
-    存儲位置（按優先順序）：
-    1. st.query_params - URL 參數（最可靠，不受 iframe 限制）
-    2. Cookie - 作為備援
+    存儲位置：Cookie 唯一持久化存儲
+    ⚠️ 不再寫入 URL 參數 —— URL 中的 sid 相當於 Bearer Token，
+       任何人複製 URL 即可冒充該用戶，是嚴重安全漏洞。
+
+    修復說明（2026-02-23）：
+    - 移除 st.query_params 寫入（v4.0 設計缺陷）
+    - 改為 Cookie 唯一持久化（僅當前瀏覽器可讀）
+    - 如果 URL 中殘留舊版 sid，同時清除它
     """
-    # 1. 保存到 URL 參數（主要）
+    # 清除 URL 中殘留的 sid（防止舊版本留下的安全漏洞）
     try:
-        st.query_params[QUERY_PARAM_KEY] = session_id
-        logger.info(f"Session ID 已存入 URL 參數")
-    except Exception as e:
-        logger.warning(f"URL 參數存儲失敗: {e}")
+        if QUERY_PARAM_KEY in st.query_params:
+            del st.query_params[QUERY_PARAM_KEY]
+    except Exception:
+        pass
 
-    # 2. 保存到 Cookie（備援）
+    # 唯一存儲：Cookie（7 天，瀏覽器本地，不可被 URL 分享）
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
             expires_at = datetime.now() + timedelta(days=COOKIE_EXPIRY_DAYS)
             cookie_manager.set(COOKIE_NAME, session_id, expires_at=expires_at)
-            logger.info(f"Session ID 已存入 Cookie")
+            logger.info("Session ID 已存入 Cookie（URL 已清除）")
     except Exception as e:
         logger.warning(f"Cookie 存儲失敗: {e}")
 
 
 def load_session_id() -> Optional[str]:
     """
-    讀取 Session ID（v4.0）
+    讀取 Session ID（v4.2 安全修復版）
 
     讀取位置（按優先順序）：
-    1. st.query_params - URL 參數
-    2. Cookie
+    1. Cookie（主要）
+    2. URL 參數（向後兼容舊版本，讀完立即刪除）
+
+    安全設計（2026-02-23 修復）：
+    - Cookie 為唯一持久化存儲，不回寫 URL
+    - URL 中如有 sid（舊版殘留或人工植入），讀後立即刪除
+    - 防止攻擊者複製 URL 冒充他人身份
 
     Returns:
         Session ID 或 None
     """
-    # 1. 從 URL 參數讀取（優先）
-    try:
-        sid = st.query_params.get(QUERY_PARAM_KEY)
-        if sid and len(sid) >= 20:  # session_id 至少 20 字元
-            logger.info("從 URL 參數讀取 Session ID 成功")
-            return sid
-    except Exception as e:
-        logger.debug(f"URL 參數讀取失敗: {e}")
-
-    # 2. 從 Cookie 讀取（備援）
+    # 1. 從 Cookie 讀取（主要，安全的）
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
             sid = cookie_manager.get(COOKIE_NAME)
             if sid and len(sid) >= 20:
                 logger.info("從 Cookie 讀取 Session ID 成功")
-                # 同步到 URL 參數
-                try:
-                    st.query_params[QUERY_PARAM_KEY] = sid
-                except:
-                    pass
                 return sid
     except Exception as e:
         logger.debug(f"Cookie 讀取失敗: {e}")
+
+    # 2. 從 URL 參數讀取（向後兼容，讀完立即銷毀）
+    # ⚠️ 這裡處理舊版本遺留的 ?sid=xxx —— 讀取後立即從 URL 移除，
+    #    然後存入 Cookie，確保下次走 Cookie 路徑（不再暴露於 URL）
+    try:
+        sid = st.query_params.get(QUERY_PARAM_KEY)
+        if sid and len(sid) >= 20:
+            logger.info("從 URL 參數讀取 Session ID（將立即清除 URL）")
+
+            # 立即從 URL 移除（防止 URL 被分享/截圖洩漏）
+            try:
+                del st.query_params[QUERY_PARAM_KEY]
+            except Exception:
+                pass
+
+            # 移入 Cookie 持久化（下次直接走 Cookie 路徑）
+            try:
+                cookie_manager = _get_cookie_manager()
+                if cookie_manager:
+                    expires_at = datetime.now() + timedelta(days=COOKIE_EXPIRY_DAYS)
+                    cookie_manager.set(COOKIE_NAME, sid, expires_at=expires_at)
+            except Exception:
+                pass
+
+            return sid
+    except Exception as e:
+        logger.debug(f"URL 參數讀取失敗: {e}")
 
     return None
 
