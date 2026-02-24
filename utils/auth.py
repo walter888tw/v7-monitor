@@ -349,7 +349,7 @@ def login(api_base_url: str, email: str, password: str, remember_me: bool = Fals
         response = requests.post(
             f"{api_base_url}/auth/login",
             json={"email": email, "password": password},
-            timeout=15
+            timeout=30  # 增加到 30 秒：後端 DB pool 壓力大時 15 秒可能不夠
         )
 
         if response.status_code == 200:
