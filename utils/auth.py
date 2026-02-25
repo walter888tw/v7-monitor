@@ -220,52 +220,61 @@ def get_headers() -> Dict[str, str]:
 
 def save_session_id(session_id: str):
     """
-    保存 Session ID（v4.5 多重存儲）
+    保存 Session ID（v4.7 — st.query_params 為主）
 
-    v4.5 改進：
-    - 主要存儲：JavaScript 直接寫入 sessionStorage + localStorage + Cookie
-    - 備援存儲：CookieManager（如果可用）
-    - 移除 URL 參數寫入（安全漏洞）
+    v4.7 修正：
+    - Streamlit Cloud 的 component iframe 有 sandbox 限制（opaque origin），
+      無法透過 JS 寫入 app iframe 的 sessionStorage/localStorage/Cookie。
+    - 改用 st.query_params 作為主要持久化機制（Streamlit 原生，F5 安全）。
+    - JS 和 CookieManager 保留作為輔助（某些環境仍有效）。
     """
-    # 清除 URL 中殘留的 sid（防止舊版本留下的安全漏洞）
+    # 1. st.query_params — 最可靠（Streamlit 原生，不受 iframe sandbox 限制）
     try:
-        if QUERY_PARAM_KEY in st.query_params:
-            del st.query_params[QUERY_PARAM_KEY]
-    except Exception:
-        pass
+        st.query_params[QUERY_PARAM_KEY] = session_id
+        logger.info("Session ID 已存入 st.query_params")
+    except Exception as e:
+        logger.warning(f"st.query_params 存儲失敗: {e}")
 
-    # 1. JavaScript 直接存儲（最可靠）
+    # 2. JavaScript 輔助存儲（本地環境有效）
     _save_session_js(session_id)
 
-    # 2. CookieManager 備援
+    # 3. CookieManager 備援
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
             expires_at = datetime.now() + timedelta(days=COOKIE_EXPIRY_DAYS)
             cookie_manager.set(COOKIE_NAME, session_id, expires_at=expires_at)
-            logger.info("Session ID 已存入 CookieManager（備援）")
     except Exception as e:
-        logger.warning(f"CookieManager 存儲失敗: {e}")
+        logger.debug(f"CookieManager 存儲失敗: {e}")
 
 
 def load_session_id() -> Optional[str]:
     """
-    讀取 Session ID（v4.5 多重讀取）
+    讀取 Session ID（v4.7 — st.query_params 優先）
 
-    讀取優先順序：
-    1. JavaScript 直接讀取（sessionStorage → localStorage → Cookie，最可靠）
-    2. CookieManager 備援
-    3. URL 參數（向後兼容舊版本，讀完立即刪除）
+    v4.7 讀取優先順序：
+    1. st.query_params（Streamlit 原生，F5 安全，Streamlit Cloud 最可靠）
+    2. JavaScript（sessionStorage/localStorage/Cookie，本地環境有效）
+    3. CookieManager（備援）
 
     Returns:
         Session ID 或 None
     """
-    # 1. JavaScript 直接讀取（最可靠，支援 Streamlit Cloud）
+    # 1. st.query_params — 最可靠
+    try:
+        sid = st.query_params.get(QUERY_PARAM_KEY)
+        if sid and len(sid) >= 20:
+            logger.info("從 st.query_params 讀取 Session ID 成功")
+            return sid
+    except Exception as e:
+        logger.debug(f"st.query_params 讀取失敗: {e}")
+
+    # 2. JavaScript 輔助讀取
     sid = _read_session_id_js()
     if sid:
         return sid
 
-    # 2. CookieManager 備援
+    # 3. CookieManager 備援
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
@@ -275,21 +284,6 @@ def load_session_id() -> Optional[str]:
                 return sid
     except Exception as e:
         logger.debug(f"CookieManager 讀取失敗: {e}")
-
-    # 3. URL 參數（向後兼容舊版本，讀完立即刪除）
-    try:
-        sid = st.query_params.get(QUERY_PARAM_KEY)
-        if sid and len(sid) >= 20:
-            logger.info("從 URL 參數讀取 Session ID（將立即清除 URL）")
-            try:
-                del st.query_params[QUERY_PARAM_KEY]
-            except Exception:
-                pass
-            # 移入持久化存儲
-            _save_session_js(sid)
-            return sid
-    except Exception as e:
-        logger.debug(f"URL 參數讀取失敗: {e}")
 
     return None
 
