@@ -1,22 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-認證工具模組 v4.5
+認證工具模組 v5.0
 提供 JWT 認證相關功能 + 服務端 Session ID 管理
 
-v4.5 修復說明（2026-02-25）：
+v5.0 修復說明（2026-02-25）：
 ==================================
-v4.4 問題診斷：
-- CookieManager 在 Streamlit Cloud iframe 中讀取不可靠
-- _reset_cookie_manager() 每次 rerun 銷毀已收到資料的 CM
-- 導致 F5 重整後 Cookie 永遠讀不到 → 跳回登入頁
+根因分析（Playwright 雲端驗證）：
+- components.html() 的 srcdoc iframe 存儲與 app iframe 隔離
+  （即使有 allow-same-origin，srcdoc 寫入的 sessionStorage/localStorage/cookie
+   對 app iframe 不可見，已在 Streamlit Cloud 上實驗確認）
+- streamlit_js_eval 的 component iframe 與 app iframe 同源
+  （已驗證可互相讀寫 sessionStorage/localStorage/cookie）
+- st.query_params 會暴露 sid 在 URL（造成 session 混用風險）
 
-v4.5 解決方案：
-- 使用 JavaScript 直接存取 sessionStorage + localStorage + Cookie（三重存儲）
-- sessionStorage: F5 重整安全（同分頁持續）
-- localStorage: 跨會話持續（「記住我」功能）
-- Cookie: 備援（CookieManager 仍可用時）
-- 讀取使用 streamlit_js_eval 直接回傳結果給 Python
-- 移除 _reset_cookie_manager()（不再需要）
+v5.0 解決方案：
+- 統一使用 streamlit_js_eval 進行瀏覽器存儲同步（read/write/clear）
+- 完全移除 st.query_params（sid 不再出現在 URL）
+- 完全移除 components.html() 存儲操作
+- sessionStorage（F5 安全）+ localStorage（記住我）+ Cookie（備援）
 """
 import streamlit as st
 import streamlit.components.v1 as components
@@ -28,152 +29,138 @@ import logging
 logger = logging.getLogger(__name__)
 
 # === 常量配置 ===
-QUERY_PARAM_KEY = "sid"  # URL 參數鍵名（v4.0 改為 sid）
-COOKIE_NAME = "v7_sid"   # Cookie 名稱（v4.0 改為 v7_sid）
-COOKIE_EXPIRY_DAYS = 7   # Cookie 過期天數
+COOKIE_NAME = "v7_sid"   # Cookie/Storage 鍵名
+COOKIE_EXPIRY_DAYS = 7   # 過期天數
 
-def _get_cookie_manager():
+
+# ==================== 瀏覽器存儲同步（v5.0 核心）====================
+
+def _browser_storage_sync() -> Optional[str]:
     """
-    獲取 Cookie Manager 實例（備援用途）
+    v5.0 核心：透過 streamlit_js_eval 同步瀏覽器存儲
 
-    v4.5 說明：
-    - CookieManager 僅作為寫入備援（save/clear 時額外調用）
-    - 讀取改用 streamlit_js_eval 直接從瀏覽器取值（更可靠）
-    - 使用 session_state 快取避免 DuplicateWidgetID
-    """
-    state_key = "_v7_cookie_manager"
+    技術背景（Playwright 實驗驗證）：
+    - streamlit_js_eval 的 component iframe 與 app iframe 共享同一 origin
+      → 可以讀寫 app iframe 的 sessionStorage/localStorage/cookie
+    - components.html() 的 srcdoc iframe 存儲隔離
+      → 寫入的資料對 app iframe 不可見（已確認不可用）
 
-    if state_key in st.session_state and st.session_state[state_key] is not None:
-        return st.session_state[state_key]
+    三種模式（依 session_state 自動判斷）：
+    1. CLEAR: _sid_clear_pending=True → 清除所有存儲
+    2. WRITE: 已認證 + remember_me → 同步 session_id 到瀏覽器
+    3. READ: 未認證 → 從瀏覽器讀取 session_id
 
-    try:
-        from extra_streamlit_components import CookieManager
-        cm = CookieManager(key="v7_cookie_manager_v4")
-        st.session_state[state_key] = cm
-        return cm
-    except ImportError:
-        logger.warning("extra-streamlit-components 未安裝，Cookie 持久化功能將不可用")
-        st.session_state[state_key] = None
-        return None
-    except Exception as e:
-        logger.warning(f"CookieManager 初始化失敗: {e}")
-        st.session_state[state_key] = None
-        return None
-
-
-def _save_session_js(session_id: str):
-    """
-    使用 JavaScript 直接保存 Session ID（v4.6 修正）
-
-    v4.6 修正：
-    - components.html() 的 srcdoc iframe 有 opaque origin，
-      其 sessionStorage/localStorage 對 app iframe 不可見。
-    - 必須透過 window.parent / window.top 寫入 app iframe 的 storage。
-    - 同時嘗試 window / window.parent / window.top，以 try-catch 容錯。
-    """
-    max_age = COOKIE_EXPIRY_DAYS * 86400  # 秒
-    js = f"""
-    <script>
-    (function() {{
-        var key = '{COOKIE_NAME}';
-        var val = '{session_id}';
-        var maxAge = {max_age};
-        var targets = [window];
-        try {{ if (window.parent && window.parent !== window) targets.push(window.parent); }} catch(e) {{}}
-        try {{ if (window.top && window.top !== window && window.top !== window.parent) targets.push(window.top); }} catch(e) {{}}
-        for (var i = 0; i < targets.length; i++) {{
-            var w = targets[i];
-            try {{ w.sessionStorage.setItem(key, val); }} catch(e) {{}}
-            try {{ w.localStorage.setItem(key, val); }} catch(e) {{}}
-            try {{ w.document.cookie = key + '=' + encodeURIComponent(val) + '; max-age=' + maxAge + '; path=/; SameSite=Lax'; }} catch(e) {{}}
-        }}
-    }})();
-    </script>
-    """
-    components.html(js, height=0)
-
-
-def _read_session_id_js() -> Optional[str]:
-    """
-    使用 JavaScript 直接從瀏覽器讀取 Session ID（v4.6 修正）
-
-    v4.6 修正：
-    - streamlit_js_eval 也在 component iframe 中執行，
-      其 sessionStorage/localStorage 可能是隔離的 opaque origin。
-    - 必須同時嘗試 window / window.parent / window.top 讀取。
+    Returns:
+        Session ID 或 None（首次渲染返回 None，等 rerun 後回傳實際值）
     """
     try:
         from streamlit_js_eval import streamlit_js_eval
+    except ImportError:
+        logger.warning("streamlit_js_eval 未安裝，瀏覽器存儲同步不可用")
+        return None
 
-        js_code = f"""
+    clear_flag = st.session_state.get('_sid_clear_pending', False)
+    current_sid = st.session_state.get('session_id') or ''
+    remember = st.session_state.get('remember_me', False)
+
+    if clear_flag:
+        # === CLEAR 模式 ===
+        js = f"""
+        (function() {{
+            var key = '{COOKIE_NAME}';
+            try {{ sessionStorage.removeItem(key); }} catch(e) {{}}
+            try {{ localStorage.removeItem(key); }} catch(e) {{}}
+            try {{ document.cookie = key + '=; max-age=0; path=/'; }} catch(e) {{}}
+            return '';
+        }})()
+        """
+        st.session_state.pop('_sid_clear_pending', None)
+
+    elif current_sid and len(current_sid) >= 20 and remember:
+        # === WRITE 模式 ===
+        max_age = COOKIE_EXPIRY_DAYS * 86400
+        js = f"""
+        (function() {{
+            var key = '{COOKIE_NAME}';
+            var val = '{current_sid}';
+            var maxAge = {max_age};
+            try {{ sessionStorage.setItem(key, val); }} catch(e) {{}}
+            try {{ localStorage.setItem(key, val); }} catch(e) {{}}
+            try {{ document.cookie = key + '=' + encodeURIComponent(val) + '; max-age=' + maxAge + '; path=/; SameSite=Lax'; }} catch(e) {{}}
+            return val;
+        }})()
+        """
+
+    else:
+        # === READ 模式 ===
+        js = f"""
         (function() {{
             var key = '{COOKIE_NAME}';
             var minLen = 20;
-            var targets = [window];
-            try {{ if (window.parent && window.parent !== window) targets.push(window.parent); }} catch(e) {{}}
-            try {{ if (window.top && window.top !== window && window.top !== window.parent) targets.push(window.top); }} catch(e) {{}}
-            for (var t = 0; t < targets.length; t++) {{
-                var w = targets[t];
-                try {{
-                    var s = w.sessionStorage.getItem(key);
-                    if (s && s.length >= minLen) return s;
-                }} catch(e) {{}}
-                try {{
-                    var l = w.localStorage.getItem(key);
-                    if (l && l.length >= minLen) return l;
-                }} catch(e) {{}}
-                try {{
-                    var prefix = key + '=';
-                    var cookies = w.document.cookie.split(';');
-                    for (var i = 0; i < cookies.length; i++) {{
-                        var c = cookies[i].trim();
-                        if (c.indexOf(prefix) === 0) {{
-                            var val = decodeURIComponent(c.substring(prefix.length));
-                            if (val.length >= minLen) return val;
-                        }}
+            try {{
+                var s = sessionStorage.getItem(key);
+                if (s && s.length >= minLen) return s;
+            }} catch(e) {{}}
+            try {{
+                var l = localStorage.getItem(key);
+                if (l && l.length >= minLen) return l;
+            }} catch(e) {{}}
+            try {{
+                var prefix = key + '=';
+                var cookies = document.cookie.split(';');
+                for (var i = 0; i < cookies.length; i++) {{
+                    var c = cookies[i].trim();
+                    if (c.indexOf(prefix) === 0) {{
+                        var val = decodeURIComponent(c.substring(prefix.length));
+                        if (val.length >= minLen) return val;
                     }}
-                }} catch(e) {{}}
-            }}
+                }}
+            }} catch(e) {{}}
             return '';
         }})()
         """
 
-        result = streamlit_js_eval(js_expressions=js_code, key="_v7_sid_reader")
-
+    try:
+        result = streamlit_js_eval(js_expressions=js, key="_sid_sync")
         if result and isinstance(result, str) and len(result) >= 20:
-            logger.info("從 JS 讀取 Session ID 成功（sessionStorage/localStorage/Cookie）")
             return result
-
-        return None
-    except ImportError:
-        logger.debug("streamlit_js_eval 未安裝，跳過 JS 讀取")
-        return None
     except Exception as e:
-        logger.debug(f"JS 讀取失敗: {e}")
-        return None
+        logger.debug(f"瀏覽器存儲同步失敗: {e}")
+
+    return None
 
 
-def _clear_session_js():
+# ==================== Session ID 存儲介面 ====================
+
+def save_session_id(session_id: str):
     """
-    使用 JavaScript 清除所有 Session 存儲（v4.6 修正）
+    保存 Session ID（v5.0）
+
+    v5.0: 實際寫入由 _browser_storage_sync() 自動處理。
+    login() 已將 session_id 和 remember_me 設入 session_state，
+    下次 rerun 時 _browser_storage_sync() 會在 WRITE 模式下同步到瀏覽器。
     """
-    js = f"""
-    <script>
-    (function() {{
-        var key = '{COOKIE_NAME}';
-        var targets = [window];
-        try {{ if (window.parent && window.parent !== window) targets.push(window.parent); }} catch(e) {{}}
-        try {{ if (window.top && window.top !== window && window.top !== window.parent) targets.push(window.top); }} catch(e) {{}}
-        for (var i = 0; i < targets.length; i++) {{
-            var w = targets[i];
-            try {{ w.sessionStorage.removeItem(key); }} catch(e) {{}}
-            try {{ w.localStorage.removeItem(key); }} catch(e) {{}}
-            try {{ w.document.cookie = key + '=; max-age=0; path=/'; }} catch(e) {{}}
-        }}
-    }})();
-    </script>
+    logger.info(f"Session ID 已標記為需持久化 (sid={session_id[:8]}...)")
+
+
+def load_session_id() -> Optional[str]:
     """
-    components.html(js, height=0)
+    從瀏覽器存儲讀取 Session ID（v5.0）
+
+    v5.0: 透過 _browser_storage_sync() 讀取。
+    首次渲染返回 None（streamlit_js_eval 尚未回傳），等 rerun 後回傳實際值。
+    """
+    return _browser_storage_sync()
+
+
+def clear_session_id():
+    """
+    清除瀏覽器存儲中的 Session ID（v5.0）
+
+    v5.0: 設定清除標記，下次 _browser_storage_sync() 呼叫時執行清除。
+    """
+    st.session_state['_sid_clear_pending'] = True
+    logger.info("Session ID 清除已排程")
 
 
 # ==================== Session 初始化 ====================
@@ -184,12 +171,11 @@ def init_session():
         'user_token': None,
         'user_email': None,
         'refresh_token': None,
-        'session_id': None,  # v4.0 新增
+        'session_id': None,
         'user_id': None,
         'username': None,
-        'subscription_tier': None,  # v4.0 新增
+        'subscription_tier': None,
         'remember_me': False,
-        # 恢復相關狀態
         'auth_restore_done': False,
     }
     for key, default_value in defaults.items():
@@ -216,116 +202,19 @@ def get_headers() -> Dict[str, str]:
     return {}
 
 
-# ==================== Session ID 存儲層（v4.0 簡化版） ====================
-
-def save_session_id(session_id: str):
-    """
-    保存 Session ID（v4.7 — st.query_params 為主）
-
-    v4.7 修正：
-    - Streamlit Cloud 的 component iframe 有 sandbox 限制（opaque origin），
-      無法透過 JS 寫入 app iframe 的 sessionStorage/localStorage/Cookie。
-    - 改用 st.query_params 作為主要持久化機制（Streamlit 原生，F5 安全）。
-    - JS 和 CookieManager 保留作為輔助（某些環境仍有效）。
-    """
-    # 1. st.query_params — 最可靠（Streamlit 原生，不受 iframe sandbox 限制）
-    try:
-        st.query_params[QUERY_PARAM_KEY] = session_id
-        logger.info("Session ID 已存入 st.query_params")
-    except Exception as e:
-        logger.warning(f"st.query_params 存儲失敗: {e}")
-
-    # 2. JavaScript 輔助存儲（本地環境有效）
-    _save_session_js(session_id)
-
-    # 3. CookieManager 備援
-    try:
-        cookie_manager = _get_cookie_manager()
-        if cookie_manager:
-            expires_at = datetime.now() + timedelta(days=COOKIE_EXPIRY_DAYS)
-            cookie_manager.set(COOKIE_NAME, session_id, expires_at=expires_at)
-    except Exception as e:
-        logger.debug(f"CookieManager 存儲失敗: {e}")
-
-
-def load_session_id() -> Optional[str]:
-    """
-    讀取 Session ID（v4.7 — st.query_params 優先）
-
-    v4.7 讀取優先順序：
-    1. st.query_params（Streamlit 原生，F5 安全，Streamlit Cloud 最可靠）
-    2. JavaScript（sessionStorage/localStorage/Cookie，本地環境有效）
-    3. CookieManager（備援）
-
-    Returns:
-        Session ID 或 None
-    """
-    # 1. st.query_params — 最可靠
-    try:
-        sid = st.query_params.get(QUERY_PARAM_KEY)
-        if sid and len(sid) >= 20:
-            logger.info("從 st.query_params 讀取 Session ID 成功")
-            return sid
-    except Exception as e:
-        logger.debug(f"st.query_params 讀取失敗: {e}")
-
-    # 2. JavaScript 輔助讀取
-    sid = _read_session_id_js()
-    if sid:
-        return sid
-
-    # 3. CookieManager 備援
-    try:
-        cookie_manager = _get_cookie_manager()
-        if cookie_manager:
-            sid = cookie_manager.get(COOKIE_NAME)
-            if sid and len(sid) >= 20:
-                logger.info("從 CookieManager 讀取 Session ID 成功（備援）")
-                return sid
-    except Exception as e:
-        logger.debug(f"CookieManager 讀取失敗: {e}")
-
-    return None
-
-
-def clear_session_id():
-    """清除所有 Session ID 存儲（v4.5 多重清除）"""
-    # 1. JavaScript 清除所有存儲
-    _clear_session_js()
-
-    # 2. URL 參數清除
-    try:
-        if QUERY_PARAM_KEY in st.query_params:
-            del st.query_params[QUERY_PARAM_KEY]
-    except Exception as e:
-        logger.debug(f"URL 參數清除失敗: {e}")
-
-    # 3. CookieManager 備援清除
-    try:
-        cookie_manager = _get_cookie_manager()
-        if cookie_manager:
-            cookie_manager.delete(COOKIE_NAME)
-    except Exception as e:
-        logger.debug(f"CookieManager 清除失敗: {e}")
-
-
-# ==================== v4.0 核心：Session 驗證 ====================
+# ==================== Session 驗證 ====================
 
 def verify_session(api_base_url: str, session_id: str, refresh_token: Optional[str] = None) -> Optional[Dict]:
     """
-    向後端驗證 Session ID（v4.3 POST + 二次驗證）
-
-    v4.3 改進：
-    - 改為 POST 方法（敏感資訊不在 URL/日誌中）
-    - 支援 refresh_token 二次驗證（可選）
+    向後端驗證 Session ID（POST + 可選二次驗證）
 
     Args:
         api_base_url: API 基礎 URL
         session_id: 要驗證的 Session ID
-        refresh_token: 可選的 Refresh Token（提供時做二次驗證）
+        refresh_token: 可選的 Refresh Token
 
     Returns:
-        成功時返回 {"success": True, "access_token": ..., "refresh_token": ..., "user": {...}, ...}
+        成功時返回 {"success": True, "access_token": ..., "user": {...}, ...}
         失敗時返回 None
     """
     try:
@@ -362,81 +251,64 @@ def verify_session(api_base_url: str, session_id: str, refresh_token: Optional[s
         return None
 
 
-# ==================== 恢復機制（v4.0 簡化版） ====================
+# ==================== 恢復機制（v5.0）====================
 
 def try_restore_session(api_base_url: str) -> bool:
     """
-    嘗試恢復登入狀態（v4.5 JavaScript 直接讀取）
+    嘗試恢復登入狀態（v5.0 — streamlit_js_eval 瀏覽器同步）
 
-    v4.5 修正：
-    - 使用 streamlit_js_eval 直接從瀏覽器讀取 sessionStorage/localStorage/Cookie
-    - 首次 render 時 JS 尚未執行（返回 0），不標記完成，等 rerun 後再試
-    - 移除 _reset_cookie_manager()（不再需要，JS 讀取不依賴 CookieManager）
+    v5.0 核心改動：
+    - 每次 rerun 都呼叫 _browser_storage_sync()（確保 read/write/clear 都正確執行）
+    - 移除 st.query_params（sid 不再暴露在 URL）
+    - 移除 components.html() 存儲（srcdoc iframe 隔離問題）
 
-    流程（三層驗證）：
-    1. 檢查 st.session_state 中是否有 user_token
-    2. 如果有，比對 session_state 中的 session_id
-    3. 如果沒有 user_token，透過 JS 讀取 session_id 並調用 API 驗證
-
-    Args:
-        api_base_url: API 基礎 URL
-
-    Returns:
-        是否成功恢復
+    流程：
+    1. 同步瀏覽器存儲（_browser_storage_sync）
+    2. 已完成恢復 → 直接返回
+    3. 已認證（session_state 有 token）→ 快速路徑
+    4. 有 browser_sid → API 驗證 → 恢復
+    5. 無 session_id → 登入頁
     """
-    # 如果已完成恢復流程（避免重複執行）
+    # v5.0: 每次 rerun 都同步瀏覽器存儲
+    # 這確保：登入後寫入、F5 後讀取、登出後清除
+    browser_sid = _browser_storage_sync()
+
+    # 已完成恢復流程（避免重複執行）
     if st.session_state.get('auth_restore_done'):
-        return st.session_state.get('user_token') is not None
+        return is_authenticated()
 
-    # 第一層：檢查是否已有 token
+    # 第一層：已有 token（例如剛登入後的 rerun）
     if is_authenticated():
-        # 第二層：驗證 session_id 一致性（防止污染）
-        stored_sid = st.session_state.get('session_id')
-        current_sid = load_session_id()
+        st.session_state.auth_restore_done = True
+        return True
 
-        if stored_sid and current_sid and stored_sid == current_sid:
-            logger.info(f"身份驗證通過（快速路徑）: {st.session_state.get('user_email', 'N/A')}")
-            st.session_state.auth_restore_done = True
-            return True
-        else:
-            logger.warning(f"Session ID 不一致！stored={stored_sid[:8] if stored_sid else 'None'}..., current={current_sid[:8] if current_sid else 'None'}...")
-            logger.warning("清空 session_state 並重新驗證")
-            for key in ['user_token', 'session_id', 'user_email', 'username', 'subscription_tier', 'refresh_token']:
-                if key in st.session_state:
-                    del st.session_state[key]
-
-    # 第三層：讀取 Session ID 並調用 API 驗證
-    session_id = load_session_id()
-
-    if not session_id:
-        # v4.5: streamlit_js_eval 首次 render 返回 0（JS 尚未執行）
-        # 真正的值要等瀏覽器執行 JS 後觸發 rerun 才能拿到
-        # 第一次嘗試：不標記 auth_restore_done，讓 JS 組件 rerun 後再試
+    # 第二層：從瀏覽器讀取 session_id
+    if not browser_sid:
+        # streamlit_js_eval 首次渲染返回 0/None，等 rerun 後再試
         attempts = st.session_state.get('_cookie_load_attempts', 0)
         st.session_state['_cookie_load_attempts'] = attempts + 1
 
         if attempts < 1:
-            logger.info("JS 組件首次載入，等待瀏覽器 rerun...")
+            logger.info("等待瀏覽器存儲回傳...")
             return False
 
-        # 多次嘗試仍無 Session ID → 確實未登入
+        # 多次嘗試仍無 → 確實未登入
         logger.info("無 Session ID，進入登入頁")
         st.session_state.auth_restore_done = True
         return False
 
-    # 找到 session_id，清除嘗試計數
+    # 找到 browser_sid，清除嘗試計數
     st.session_state.pop('_cookie_load_attempts', None)
 
-    # 調用後端驗證（v4.3: POST + 可選二次驗證）
-    logger.info(f"調用 /verify-session API (sid={session_id[:8]}...)")
+    # 第三層：API 驗證
+    logger.info(f"驗證 Session ID (sid={browser_sid[:8]}...)")
     refresh_token = st.session_state.get('refresh_token')
-    result = verify_session(api_base_url, session_id, refresh_token=refresh_token)
+    result = verify_session(api_base_url, browser_sid, refresh_token=refresh_token)
 
     if result:
-        # 恢復成功
         st.session_state.user_token = result["access_token"]
         st.session_state.refresh_token = result.get("refresh_token")
-        st.session_state.session_id = result.get("session_id", session_id)
+        st.session_state.session_id = result.get("session_id", browser_sid)
         st.session_state.user_email = result["user"]["email"]
         st.session_state.username = result["user"].get("username")
         st.session_state.subscription_tier = result["user"].get("subscription_tier")
@@ -445,7 +317,6 @@ def try_restore_session(api_base_url: str) -> bool:
         logger.info(f"登入狀態已恢復: {result['user']['email']}")
         return True
     else:
-        # 驗證失敗，清除存儲
         logger.warning("Session 驗證失敗，清除存儲")
         clear_session_id()
         st.session_state.auth_restore_done = True
@@ -456,7 +327,7 @@ def try_restore_session(api_base_url: str) -> bool:
 
 def login(api_base_url: str, email: str, password: str, remember_me: bool = False) -> Dict:
     """
-    執行登入（v4.0）
+    執行登入（v5.0）
 
     Args:
         api_base_url: API 基礎 URL
@@ -471,7 +342,7 @@ def login(api_base_url: str, email: str, password: str, remember_me: bool = Fals
         response = requests.post(
             f"{api_base_url}/auth/login",
             json={"email": email, "password": password},
-            timeout=30  # 增加到 30 秒：後端 DB pool 壓力大時 15 秒可能不夠
+            timeout=30
         )
 
         if response.status_code == 200:
@@ -480,12 +351,13 @@ def login(api_base_url: str, email: str, password: str, remember_me: bool = Fals
             # 儲存到 session state
             st.session_state.user_token = data["access_token"]
             st.session_state.refresh_token = data["refresh_token"]
-            st.session_state.session_id = data["session_id"]  # v4.0 新增
+            st.session_state.session_id = data["session_id"]
             st.session_state.user_email = email
             st.session_state.remember_me = remember_me
             st.session_state.auth_restore_done = True
 
-            # 如果勾選「記住我」，保存 session_id 到持久化存儲
+            # v5.0: save_session_id 是 no-op
+            # 實際寫入由 _browser_storage_sync() 在下次 rerun 時自動處理
             if remember_me:
                 save_session_id(data["session_id"])
 
@@ -503,12 +375,7 @@ def login(api_base_url: str, email: str, password: str, remember_me: bool = Fals
 
 
 def logout(api_base_url: str):
-    """
-    登出（v4.0）
-
-    Args:
-        api_base_url: API 基礎 URL
-    """
+    """登出（v5.0）"""
     # 通知後端登出
     if st.session_state.get('refresh_token'):
         try:
@@ -520,7 +387,7 @@ def logout(api_base_url: str):
         except Exception:
             pass
 
-    # 清除持久化存儲
+    # 清除瀏覽器存儲（排程到下次 rerun）
     clear_session_id()
 
     # 清除 session state
@@ -603,18 +470,12 @@ def render_login_form(api_base_url: str) -> bool:
 
 def inject_visibility_listener():
     """
-    注入頁面可見性監聯器（v4.0 極簡版）
-
-    v4.0 改進：
-    - 不再依賴 localStorage
-    - 不自動 reload
-    - 只記錄日誌，讓 Streamlit 的 15 秒自動刷新處理
+    注入頁面可見性監聽器（v4.0 極簡版）
+    僅用於日誌記錄，不涉及存儲操作。
     """
-    # 已認證時才注入
     if not is_authenticated():
         return
 
-    # 只注入一次
     if st.session_state.get('visibility_listener_injected'):
         return
 
@@ -632,7 +493,7 @@ def inject_visibility_listener():
             }
         });
 
-        console.log('[V7] 可見性監聽器已安裝 (v4.0)');
+        console.log('[V7] 可見性監聽器已安裝 (v5.0)');
     })();
     </script>
     """
@@ -672,17 +533,13 @@ def render_loading_screen():
 
 # ==================== 向後兼容（v3.0 遷移） ====================
 
-# 保留舊函式名稱，避免 app.py 報錯
 def save_auth_data(email: str, refresh_token: str):
-    """v3.0 向後兼容：改用 save_session_id"""
-    logger.warning("save_auth_data() 已棄用，請使用 save_session_id()")
-    # 在 v4.0 中，這個函式不再有意義，因為我們不存儲 refresh_token
+    """v3.0 向後兼容：已棄用"""
     pass
 
 
 def load_auth_data() -> Optional[Dict]:
-    """v3.0 向後兼容：改用 load_session_id"""
-    logger.warning("load_auth_data() 已棄用，請使用 load_session_id()")
+    """v3.0 向後兼容：已棄用"""
     return None
 
 
@@ -692,11 +549,7 @@ def clear_auth_data():
 
 
 def refresh_access_token(api_base_url: str, refresh_token: str) -> Optional[str]:
-    """
-    刷新 Access Token（v3.0 向後兼容）
-
-    v4.0 說明：此函式保留用於向後兼容，新代碼應使用 verify_session()
-    """
+    """刷新 Access Token（v3.0 向後兼容）"""
     try:
         response = requests.post(
             f"{api_base_url}/auth/refresh",
@@ -706,7 +559,6 @@ def refresh_access_token(api_base_url: str, refresh_token: str) -> Optional[str]
 
         if response.status_code == 200:
             data = response.json()
-            # v4.0: 同時更新 session_id
             if data.get("session_id"):
                 st.session_state.session_id = data["session_id"]
             return data.get("access_token")
