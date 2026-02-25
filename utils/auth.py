@@ -34,25 +34,32 @@ QUERY_PARAM_KEY = "sid"  # URL 參數鍵名（v4.0 改為 sid）
 COOKIE_NAME = "v7_sid"   # Cookie 名稱（v4.0 改為 v7_sid）
 COOKIE_EXPIRY_DAYS = 7   # Cookie 過期天數
 
-# 全局 CookieManager 實例（單例）
-_cookie_manager = None
-
-
 def _get_cookie_manager():
-    """獲取 Cookie Manager 實例（單例模式）"""
-    global _cookie_manager
-    if _cookie_manager is not None:
-        return _cookie_manager
+    """
+    獲取 Cookie Manager 實例（v4.3 per-tab 隔離版）
+
+    修復 P0-5：不再使用 module-level 全域變數。
+    改為 st.session_state 存放，確保每個 tab/connection 獨立。
+    Streamlit Cloud 是 single-process multi-connection，
+    module-level 變數會被所有用戶共享，導致帳號混用。
+    """
+    state_key = "_v7_cookie_manager"
+
+    if state_key in st.session_state and st.session_state[state_key] is not None:
+        return st.session_state[state_key]
 
     try:
         from extra_streamlit_components import CookieManager
-        _cookie_manager = CookieManager(key="v7_cookie_manager_v4")
-        return _cookie_manager
+        cm = CookieManager(key="v7_cookie_manager_v4")
+        st.session_state[state_key] = cm
+        return cm
     except ImportError:
         logger.warning("extra-streamlit-components 未安裝，Cookie 持久化功能將不可用")
+        st.session_state[state_key] = None
         return None
     except Exception as e:
         logger.warning(f"CookieManager 初始化失敗: {e}")
+        st.session_state[state_key] = None
         return None
 
 
@@ -208,22 +215,31 @@ def clear_session_id():
 
 # ==================== v4.0 核心：Session 驗證 ====================
 
-def verify_session(api_base_url: str, session_id: str) -> Optional[Dict]:
+def verify_session(api_base_url: str, session_id: str, refresh_token: Optional[str] = None) -> Optional[Dict]:
     """
-    向後端驗證 Session ID（v4.0 核心）
+    向後端驗證 Session ID（v4.3 POST + 二次驗證）
+
+    v4.3 改進：
+    - 改為 POST 方法（敏感資訊不在 URL/日誌中）
+    - 支援 refresh_token 二次驗證（可選）
 
     Args:
         api_base_url: API 基礎 URL
         session_id: 要驗證的 Session ID
+        refresh_token: 可選的 Refresh Token（提供時做二次驗證）
 
     Returns:
-        成功時返回 {"success": True, "access_token": ..., "user": {...}, ...}
+        成功時返回 {"success": True, "access_token": ..., "refresh_token": ..., "user": {...}, ...}
         失敗時返回 None
     """
     try:
-        response = requests.get(
+        body = {"session_id": session_id}
+        if refresh_token:
+            body["refresh_token"] = refresh_token
+
+        response = requests.post(
             f"{api_base_url}/auth/verify-session",
-            params={"sid": session_id},
+            json=body,
             timeout=10
         )
 
@@ -307,20 +323,22 @@ def try_restore_session(api_base_url: str) -> bool:
         st.session_state.auth_restore_done = True
         return False
 
-    # 調用後端驗證
+    # 調用後端驗證（v4.3: POST + 可選二次驗證）
     logger.info(f"調用 /verify-session API (sid={session_id[:8]}...)")
-    result = verify_session(api_base_url, session_id)
+    refresh_token = st.session_state.get('refresh_token')
+    result = verify_session(api_base_url, session_id, refresh_token=refresh_token)
 
     if result:
         # 恢復成功
         st.session_state.user_token = result["access_token"]
+        st.session_state.refresh_token = result.get("refresh_token")
         st.session_state.session_id = result.get("session_id", session_id)
         st.session_state.user_email = result["user"]["email"]
         st.session_state.username = result["user"].get("username")
         st.session_state.subscription_tier = result["user"].get("subscription_tier")
         st.session_state.remember_me = True
         st.session_state.auth_restore_done = True
-        logger.info(f"✅ 登入狀態已恢復: {result['user']['email']}")
+        logger.info(f"登入狀態已恢復: {result['user']['email']}")
         return True
     else:
         # 驗證失敗，清除存儲

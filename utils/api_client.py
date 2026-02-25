@@ -1,24 +1,29 @@
 """
-API 客戶端工具模組
+API 客戶端工具模組（v4.3 安全增強版）
 提供統一的 API 請求介面
+
+v4.3 改進：401 重試後驗證身份一致性，防止 token 刷新後身份混淆。
 """
 import requests
 import streamlit as st
 from typing import Optional, Dict, Any
 from .auth import get_headers, refresh_access_token
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class APIClient:
     """API 客戶端類別"""
-    
+
     def __init__(self, base_url: str):
         """初始化 API 客戶端
-        
+
         Args:
             base_url: API 基礎 URL（例如：http://localhost:8000/api/v1）
         """
         self.base_url = base_url.rstrip('/')
-    
+
     def _request(
         self,
         method: str,
@@ -30,7 +35,7 @@ class APIClient:
         retry_on_401: bool = True
     ) -> requests.Response:
         """發送 API 請求
-        
+
         Args:
             method: HTTP 方法（GET, POST, PUT, DELETE）
             endpoint: API 端點（例如：/auth/login）
@@ -39,13 +44,13 @@ class APIClient:
             files: 文件上傳
             timeout: 超時時間（秒）
             retry_on_401: 收到 401 時是否嘗試刷新 token 並重試
-        
+
         Returns:
             Response 對象
         """
         url = f"{self.base_url}{endpoint}"
         headers = get_headers()
-        
+
         try:
             response = requests.request(
                 method=method,
@@ -56,24 +61,38 @@ class APIClient:
                 headers=headers,
                 timeout=timeout
             )
-            
+
             # 如果收到 401 且允許重試，嘗試刷新 token
             if response.status_code == 401 and retry_on_401:
-                if refresh_access_token(self.base_url.rsplit('/api/v1', 1)[0] + '/api/v1'):
-                    # Token 刷新成功，重試請求
-                    headers = get_headers()
-                    response = requests.request(
-                        method=method,
-                        url=url,
-                        json=data,
-                        params=params,
-                        files=files,
-                        headers=headers,
-                        timeout=timeout
-                    )
-            
+                # v4.3: 記錄刷新前的 email，用於身份一致性檢查
+                pre_refresh_email = st.session_state.get('user_email')
+                refresh_token = st.session_state.get('refresh_token')
+
+                api_url = self.base_url.rsplit('/api/v1', 1)[0] + '/api/v1'
+                if refresh_token:
+                    new_token = refresh_access_token(api_url, refresh_token)
+                    if new_token:
+                        # v4.3: 刷新後驗證身份一致性
+                        post_refresh_email = st.session_state.get('user_email')
+                        if pre_refresh_email and post_refresh_email and pre_refresh_email != post_refresh_email:
+                            logger.warning(f"身份不一致！刷新前={pre_refresh_email}, 刷新後={post_refresh_email}")
+                            return response
+
+                        st.session_state.user_token = new_token
+                        # Token 刷新成功且身份一致，重試請求
+                        headers = get_headers()
+                        response = requests.request(
+                            method=method,
+                            url=url,
+                            json=data,
+                            params=params,
+                            files=files,
+                            headers=headers,
+                            timeout=timeout
+                        )
+
             return response
-        
+
         except requests.exceptions.Timeout:
             st.error("❌ 請求超時，請稍後再試")
             raise
