@@ -1,24 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-認證工具模組 v4.0
+認證工具模組 v4.5
 提供 JWT 認證相關功能 + 服務端 Session ID 管理
 
-v4.0 重構說明（2026-02-05）：
+v4.5 修復說明（2026-02-25）：
 ==================================
-v3.0 問題診斷：
-- Streamlit Cloud WebSocket 斷開會清空 session_state
-- GitHub Issue #8901（P3，至今未解決）
-- localStorage/Cookie 在 Streamlit Cloud iframe 沙箱中不可靠
+v4.4 問題診斷：
+- CookieManager 在 Streamlit Cloud iframe 中讀取不可靠
+- _reset_cookie_manager() 每次 rerun 銷毀已收到資料的 CM
+- 導致 F5 重整後 Cookie 永遠讀不到 → 跳回登入頁
 
-v4.0 解決方案：
-- 引入 session_id（32字元）作為前後端橋樑
-- 前端僅存儲短 session_id，不存儲完整 token
-- 新增 /verify-session API，單次調用恢復登入狀態
-- 移除複雜的編碼/解碼邏輯和多次重試機制
-
-流程對比：
-v3.0: 存儲 base64(email+refresh_token ~200字元) → /auth/refresh → 解析
-v4.0: 存儲 session_id (32字元) → /auth/verify-session → 直接返回
+v4.5 解決方案：
+- 使用 JavaScript 直接存取 sessionStorage + localStorage + Cookie（三重存儲）
+- sessionStorage: F5 重整安全（同分頁持續）
+- localStorage: 跨會話持續（「記住我」功能）
+- Cookie: 備援（CookieManager 仍可用時）
+- 讀取使用 streamlit_js_eval 直接回傳結果給 Python
+- 移除 _reset_cookie_manager()（不再需要）
 """
 import streamlit as st
 import streamlit.components.v1 as components
@@ -36,18 +34,12 @@ COOKIE_EXPIRY_DAYS = 7   # Cookie 過期天數
 
 def _get_cookie_manager():
     """
-    獲取 Cookie Manager 實例（v4.4 修復 F5 重整問題）
+    獲取 Cookie Manager 實例（備援用途）
 
-    v4.4 修正：
-    - CookieManager 內部的 _component_func 必須在每次 rerun 都被調用，
-      否則 Streamlit 組件不在 render tree 中，self.cookies 保持空值。
-    - 使用 session_state 做「同一次 rerun 內」的快取（避免 DuplicateWidgetID），
-      但在 try_restore_session() 開頭用 _reset_cookie_manager() 強制清除，
-      確保每次 rerun 都重新建立 CookieManager。
-
-    安全保證：
-    - 仍使用 st.session_state 存放（per-tab 隔離，不共享）
-    - module-level 變數完全不使用
+    v4.5 說明：
+    - CookieManager 僅作為寫入備援（save/clear 時額外調用）
+    - 讀取改用 streamlit_js_eval 直接從瀏覽器取值（更可靠）
+    - 使用 session_state 快取避免 DuplicateWidgetID
     """
     state_key = "_v7_cookie_manager"
 
@@ -69,24 +61,104 @@ def _get_cookie_manager():
         return None
 
 
-def _reset_cookie_manager():
+def _save_session_js(session_id: str):
     """
-    清除快取的 CookieManager，強制下次調用時重建（v4.4 新增）
+    使用 JavaScript 直接保存 Session ID（v4.5 新增）
 
-    Streamlit 組件（CookieManager 底層的 _component_func）必須在每次 rerun
-    都出現在 render tree 中，才能正確讀取瀏覽器 Cookie。
+    同時寫入三個存儲位置：
+    - sessionStorage: F5 重整安全（同一分頁持續）
+    - localStorage: 跨會話持續（關閉分頁後仍在）
+    - Cookie: 備援（供 CookieManager 讀取）
 
-    如果 CookieManager 被快取在 session_state 中，後續 rerun 會直接返回
-    舊實例，_component_func 不會被調用，self.cookies 永遠是首次 render
-    的空值 {}。
-
-    此函式在 try_restore_session() 開頭調用，確保：
-    1. F5 後能正確讀取 Cookie（第二次 rerun 時組件已有資料）
-    2. 同一次 rerun 內多次調用 _get_cookie_manager() 仍返回同一實例
+    比 CookieManager 更可靠，因為直接在瀏覽器主框架執行 JavaScript。
     """
-    state_key = "_v7_cookie_manager"
-    if state_key in st.session_state:
-        del st.session_state[state_key]
+    max_age = COOKIE_EXPIRY_DAYS * 86400  # 秒
+    js = f"""
+    <script>
+    (function() {{
+        var key = '{COOKIE_NAME}';
+        var val = '{session_id}';
+        try {{ sessionStorage.setItem(key, val); }} catch(e) {{}}
+        try {{ localStorage.setItem(key, val); }} catch(e) {{}}
+        try {{ document.cookie = key + '=' + encodeURIComponent(val) + '; max-age={max_age}; path=/; SameSite=Lax'; }} catch(e) {{}}
+    }})();
+    </script>
+    """
+    components.html(js, height=0)
+
+
+def _read_session_id_js() -> Optional[str]:
+    """
+    使用 JavaScript 直接從瀏覽器讀取 Session ID（v4.5 新增）
+
+    讀取優先順序：
+    1. sessionStorage（F5 安全，最快）
+    2. localStorage（跨會話持續）
+    3. Cookie（備援）
+
+    使用 streamlit_js_eval 執行 JS 並回傳結果。
+    注意：首次 render 返回 0（JS 尚未執行），需等 rerun 後才有值。
+    """
+    try:
+        from streamlit_js_eval import streamlit_js_eval
+
+        js_code = f"""
+        (function() {{
+            var key = '{COOKIE_NAME}';
+            var minLen = 20;
+            try {{
+                var s = sessionStorage.getItem(key);
+                if (s && s.length >= minLen) return s;
+            }} catch(e) {{}}
+            try {{
+                var l = localStorage.getItem(key);
+                if (l && l.length >= minLen) return l;
+            }} catch(e) {{}}
+            try {{
+                var prefix = key + '=';
+                var cookies = document.cookie.split(';');
+                for (var i = 0; i < cookies.length; i++) {{
+                    var c = cookies[i].trim();
+                    if (c.indexOf(prefix) === 0) {{
+                        var val = decodeURIComponent(c.substring(prefix.length));
+                        if (val.length >= minLen) return val;
+                    }}
+                }}
+            }} catch(e) {{}}
+            return '';
+        }})()
+        """
+
+        result = streamlit_js_eval(js_expressions=js_code, key="_v7_sid_reader")
+
+        if result and isinstance(result, str) and len(result) >= 20:
+            logger.info("從 JS 讀取 Session ID 成功（sessionStorage/localStorage/Cookie）")
+            return result
+
+        return None
+    except ImportError:
+        logger.debug("streamlit_js_eval 未安裝，跳過 JS 讀取")
+        return None
+    except Exception as e:
+        logger.debug(f"JS 讀取失敗: {e}")
+        return None
+
+
+def _clear_session_js():
+    """
+    使用 JavaScript 清除所有 Session 存儲（v4.5 新增）
+    """
+    js = f"""
+    <script>
+    (function() {{
+        var key = '{COOKIE_NAME}';
+        try {{ sessionStorage.removeItem(key); }} catch(e) {{}}
+        try {{ localStorage.removeItem(key); }} catch(e) {{}}
+        try {{ document.cookie = key + '=; max-age=0; path=/'; }} catch(e) {{}}
+    }})();
+    </script>
+    """
+    components.html(js, height=0)
 
 
 # ==================== Session 初始化 ====================
@@ -133,16 +205,12 @@ def get_headers() -> Dict[str, str]:
 
 def save_session_id(session_id: str):
     """
-    保存 Session ID（v4.2 安全修復版）
+    保存 Session ID（v4.5 多重存儲）
 
-    存儲位置：Cookie 唯一持久化存儲
-    ⚠️ 不再寫入 URL 參數 —— URL 中的 sid 相當於 Bearer Token，
-       任何人複製 URL 即可冒充該用戶，是嚴重安全漏洞。
-
-    修復說明（2026-02-23）：
-    - 移除 st.query_params 寫入（v4.0 設計缺陷）
-    - 改為 Cookie 唯一持久化（僅當前瀏覽器可讀）
-    - 如果 URL 中殘留舊版 sid，同時清除它
+    v4.5 改進：
+    - 主要存儲：JavaScript 直接寫入 sessionStorage + localStorage + Cookie
+    - 備援存儲：CookieManager（如果可用）
+    - 移除 URL 參數寫入（安全漏洞）
     """
     # 清除 URL 中殘留的 sid（防止舊版本留下的安全漏洞）
     try:
@@ -151,67 +219,59 @@ def save_session_id(session_id: str):
     except Exception:
         pass
 
-    # 唯一存儲：Cookie（7 天，瀏覽器本地，不可被 URL 分享）
+    # 1. JavaScript 直接存儲（最可靠）
+    _save_session_js(session_id)
+
+    # 2. CookieManager 備援
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
             expires_at = datetime.now() + timedelta(days=COOKIE_EXPIRY_DAYS)
             cookie_manager.set(COOKIE_NAME, session_id, expires_at=expires_at)
-            logger.info("Session ID 已存入 Cookie（URL 已清除）")
+            logger.info("Session ID 已存入 CookieManager（備援）")
     except Exception as e:
-        logger.warning(f"Cookie 存儲失敗: {e}")
+        logger.warning(f"CookieManager 存儲失敗: {e}")
 
 
 def load_session_id() -> Optional[str]:
     """
-    讀取 Session ID（v4.2 安全修復版）
+    讀取 Session ID（v4.5 多重讀取）
 
-    讀取位置（按優先順序）：
-    1. Cookie（主要）
-    2. URL 參數（向後兼容舊版本，讀完立即刪除）
-
-    安全設計（2026-02-23 修復）：
-    - Cookie 為唯一持久化存儲，不回寫 URL
-    - URL 中如有 sid（舊版殘留或人工植入），讀後立即刪除
-    - 防止攻擊者複製 URL 冒充他人身份
+    讀取優先順序：
+    1. JavaScript 直接讀取（sessionStorage → localStorage → Cookie，最可靠）
+    2. CookieManager 備援
+    3. URL 參數（向後兼容舊版本，讀完立即刪除）
 
     Returns:
         Session ID 或 None
     """
-    # 1. 從 Cookie 讀取（主要，安全的）
+    # 1. JavaScript 直接讀取（最可靠，支援 Streamlit Cloud）
+    sid = _read_session_id_js()
+    if sid:
+        return sid
+
+    # 2. CookieManager 備援
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
             sid = cookie_manager.get(COOKIE_NAME)
             if sid and len(sid) >= 20:
-                logger.info("從 Cookie 讀取 Session ID 成功")
+                logger.info("從 CookieManager 讀取 Session ID 成功（備援）")
                 return sid
     except Exception as e:
-        logger.debug(f"Cookie 讀取失敗: {e}")
+        logger.debug(f"CookieManager 讀取失敗: {e}")
 
-    # 2. 從 URL 參數讀取（向後兼容，讀完立即銷毀）
-    # ⚠️ 這裡處理舊版本遺留的 ?sid=xxx —— 讀取後立即從 URL 移除，
-    #    然後存入 Cookie，確保下次走 Cookie 路徑（不再暴露於 URL）
+    # 3. URL 參數（向後兼容舊版本，讀完立即刪除）
     try:
         sid = st.query_params.get(QUERY_PARAM_KEY)
         if sid and len(sid) >= 20:
             logger.info("從 URL 參數讀取 Session ID（將立即清除 URL）")
-
-            # 立即從 URL 移除（防止 URL 被分享/截圖洩漏）
             try:
                 del st.query_params[QUERY_PARAM_KEY]
             except Exception:
                 pass
-
-            # 移入 Cookie 持久化（下次直接走 Cookie 路徑）
-            try:
-                cookie_manager = _get_cookie_manager()
-                if cookie_manager:
-                    expires_at = datetime.now() + timedelta(days=COOKIE_EXPIRY_DAYS)
-                    cookie_manager.set(COOKIE_NAME, sid, expires_at=expires_at)
-            except Exception:
-                pass
-
+            # 移入持久化存儲
+            _save_session_js(sid)
             return sid
     except Exception as e:
         logger.debug(f"URL 參數讀取失敗: {e}")
@@ -220,23 +280,24 @@ def load_session_id() -> Optional[str]:
 
 
 def clear_session_id():
-    """清除所有 Session ID 存儲"""
-    # 清除 URL 參數
+    """清除所有 Session ID 存儲（v4.5 多重清除）"""
+    # 1. JavaScript 清除所有存儲
+    _clear_session_js()
+
+    # 2. URL 參數清除
     try:
         if QUERY_PARAM_KEY in st.query_params:
             del st.query_params[QUERY_PARAM_KEY]
-        logger.info("URL 參數已清除")
     except Exception as e:
         logger.debug(f"URL 參數清除失敗: {e}")
 
-    # 清除 Cookie
+    # 3. CookieManager 備援清除
     try:
         cookie_manager = _get_cookie_manager()
         if cookie_manager:
             cookie_manager.delete(COOKIE_NAME)
-            logger.info("Cookie 已清除")
     except Exception as e:
-        logger.debug(f"Cookie 清除失敗: {e}")
+        logger.debug(f"CookieManager 清除失敗: {e}")
 
 
 # ==================== v4.0 核心：Session 驗證 ====================
@@ -296,19 +357,17 @@ def verify_session(api_base_url: str, session_id: str, refresh_token: Optional[s
 
 def try_restore_session(api_base_url: str) -> bool:
     """
-    嘗試恢復登入狀態（v4.4 修復 F5 重整問題）
+    嘗試恢復登入狀態（v4.5 JavaScript 直接讀取）
 
-    v4.4 修正：
-    - 每次 rerun 強制重建 CookieManager（確保組件在 render tree 中）
-    - 首次 render 時 CookieManager 返回空值（瀏覽器組件尚未載入），
-      不立即標記 auth_restore_done，等組件 rerun 後再試一次
+    v4.5 修正：
+    - 使用 streamlit_js_eval 直接從瀏覽器讀取 sessionStorage/localStorage/Cookie
+    - 首次 render 時 JS 尚未執行（返回 0），不標記完成，等 rerun 後再試
+    - 移除 _reset_cookie_manager()（不再需要，JS 讀取不依賴 CookieManager）
 
     流程（三層驗證）：
     1. 檢查 st.session_state 中是否有 user_token
-    2. 如果有，比對 session_state 中的 session_id 和 cookie 中的 session_id
-       - 一致 → 快速返回（不調用 API，避免頻繁登出）
-       - 不一致 → 可能被污染，清空後重新驗證
-    3. 如果沒有 user_token，讀取 cookie/URL 中的 session_id 並調用 API 驗證
+    2. 如果有，比對 session_state 中的 session_id
+    3. 如果沒有 user_token，透過 JS 讀取 session_id 並調用 API 驗證
 
     Args:
         api_base_url: API 基礎 URL
@@ -316,10 +375,6 @@ def try_restore_session(api_base_url: str) -> bool:
     Returns:
         是否成功恢復
     """
-    # v4.4: 強制重建 CookieManager，確保 _component_func 被調用
-    # 這樣 Streamlit 組件才會出現在 render tree 中，才能讀取瀏覽器 Cookie
-    _reset_cookie_manager()
-
     # 如果已完成恢復流程（避免重複執行）
     if st.session_state.get('auth_restore_done'):
         return st.session_state.get('user_token') is not None
@@ -345,17 +400,17 @@ def try_restore_session(api_base_url: str) -> bool:
     session_id = load_session_id()
 
     if not session_id:
-        # v4.4: CookieManager 首次 render 時 _component_func 返回預設空值 {}
-        # 真正的 Cookie 資料要等瀏覽器組件載入後觸發 rerun 才能拿到
-        # 第一次嘗試：不標記 auth_restore_done，讓組件 rerun 後再試
+        # v4.5: streamlit_js_eval 首次 render 返回 0（JS 尚未執行）
+        # 真正的值要等瀏覽器執行 JS 後觸發 rerun 才能拿到
+        # 第一次嘗試：不標記 auth_restore_done，讓 JS 組件 rerun 後再試
         attempts = st.session_state.get('_cookie_load_attempts', 0)
         st.session_state['_cookie_load_attempts'] = attempts + 1
 
         if attempts < 1:
-            logger.info("Cookie 組件首次載入，等待瀏覽器 rerun...")
+            logger.info("JS 組件首次載入，等待瀏覽器 rerun...")
             return False
 
-        # 多次嘗試仍無 Cookie → 確實未登入
+        # 多次嘗試仍無 Session ID → 確實未登入
         logger.info("無 Session ID，進入登入頁")
         st.session_state.auth_restore_done = True
         return False
