@@ -36,12 +36,18 @@ COOKIE_EXPIRY_DAYS = 7   # Cookie 過期天數
 
 def _get_cookie_manager():
     """
-    獲取 Cookie Manager 實例（v4.3 per-tab 隔離版）
+    獲取 Cookie Manager 實例（v4.4 修復 F5 重整問題）
 
-    修復 P0-5：不再使用 module-level 全域變數。
-    改為 st.session_state 存放，確保每個 tab/connection 獨立。
-    Streamlit Cloud 是 single-process multi-connection，
-    module-level 變數會被所有用戶共享，導致帳號混用。
+    v4.4 修正：
+    - CookieManager 內部的 _component_func 必須在每次 rerun 都被調用，
+      否則 Streamlit 組件不在 render tree 中，self.cookies 保持空值。
+    - 使用 session_state 做「同一次 rerun 內」的快取（避免 DuplicateWidgetID），
+      但在 try_restore_session() 開頭用 _reset_cookie_manager() 強制清除，
+      確保每次 rerun 都重新建立 CookieManager。
+
+    安全保證：
+    - 仍使用 st.session_state 存放（per-tab 隔離，不共享）
+    - module-level 變數完全不使用
     """
     state_key = "_v7_cookie_manager"
 
@@ -61,6 +67,26 @@ def _get_cookie_manager():
         logger.warning(f"CookieManager 初始化失敗: {e}")
         st.session_state[state_key] = None
         return None
+
+
+def _reset_cookie_manager():
+    """
+    清除快取的 CookieManager，強制下次調用時重建（v4.4 新增）
+
+    Streamlit 組件（CookieManager 底層的 _component_func）必須在每次 rerun
+    都出現在 render tree 中，才能正確讀取瀏覽器 Cookie。
+
+    如果 CookieManager 被快取在 session_state 中，後續 rerun 會直接返回
+    舊實例，_component_func 不會被調用，self.cookies 永遠是首次 render
+    的空值 {}。
+
+    此函式在 try_restore_session() 開頭調用，確保：
+    1. F5 後能正確讀取 Cookie（第二次 rerun 時組件已有資料）
+    2. 同一次 rerun 內多次調用 _get_cookie_manager() 仍返回同一實例
+    """
+    state_key = "_v7_cookie_manager"
+    if state_key in st.session_state:
+        del st.session_state[state_key]
 
 
 # ==================== Session 初始化 ====================
@@ -270,7 +296,12 @@ def verify_session(api_base_url: str, session_id: str, refresh_token: Optional[s
 
 def try_restore_session(api_base_url: str) -> bool:
     """
-    嘗試恢復登入狀態（v4.1 安全增強版）
+    嘗試恢復登入狀態（v4.4 修復 F5 重整問題）
+
+    v4.4 修正：
+    - 每次 rerun 強制重建 CookieManager（確保組件在 render tree 中）
+    - 首次 render 時 CookieManager 返回空值（瀏覽器組件尚未載入），
+      不立即標記 auth_restore_done，等組件 rerun 後再試一次
 
     流程（三層驗證）：
     1. 檢查 st.session_state 中是否有 user_token
@@ -279,17 +310,16 @@ def try_restore_session(api_base_url: str) -> bool:
        - 不一致 → 可能被污染，清空後重新驗證
     3. 如果沒有 user_token，讀取 cookie/URL 中的 session_id 並調用 API 驗證
 
-    安全保證：
-    - 防止 session_state 被污染導致身份混淆
-    - 避免頻繁 API 調用影響用戶體驗
-    - 只有身份不一致時才強制重新驗證
-
     Args:
         api_base_url: API 基礎 URL
 
     Returns:
         是否成功恢復
     """
+    # v4.4: 強制重建 CookieManager，確保 _component_func 被調用
+    # 這樣 Streamlit 組件才會出現在 render tree 中，才能讀取瀏覽器 Cookie
+    _reset_cookie_manager()
+
     # 如果已完成恢復流程（避免重複執行）
     if st.session_state.get('auth_restore_done'):
         return st.session_state.get('user_token') is not None
@@ -301,27 +331,37 @@ def try_restore_session(api_base_url: str) -> bool:
         current_sid = load_session_id()
 
         if stored_sid and current_sid and stored_sid == current_sid:
-            # ✅ 身份一致，快速返回（不調用 API）
             logger.info(f"身份驗證通過（快速路徑）: {st.session_state.get('user_email', 'N/A')}")
             st.session_state.auth_restore_done = True
             return True
         else:
-            # ⚠️ 身份不一致，可能被污染
             logger.warning(f"Session ID 不一致！stored={stored_sid[:8] if stored_sid else 'None'}..., current={current_sid[:8] if current_sid else 'None'}...")
             logger.warning("清空 session_state 並重新驗證")
-            # 清空可能被污染的狀態
             for key in ['user_token', 'session_id', 'user_email', 'username', 'subscription_tier', 'refresh_token']:
                 if key in st.session_state:
                     del st.session_state[key]
-            # 繼續執行下方的重新驗證流程
 
     # 第三層：讀取 Session ID 並調用 API 驗證
     session_id = load_session_id()
 
     if not session_id:
+        # v4.4: CookieManager 首次 render 時 _component_func 返回預設空值 {}
+        # 真正的 Cookie 資料要等瀏覽器組件載入後觸發 rerun 才能拿到
+        # 第一次嘗試：不標記 auth_restore_done，讓組件 rerun 後再試
+        attempts = st.session_state.get('_cookie_load_attempts', 0)
+        st.session_state['_cookie_load_attempts'] = attempts + 1
+
+        if attempts < 1:
+            logger.info("Cookie 組件首次載入，等待瀏覽器 rerun...")
+            return False
+
+        # 多次嘗試仍無 Cookie → 確實未登入
         logger.info("無 Session ID，進入登入頁")
         st.session_state.auth_restore_done = True
         return False
+
+    # 找到 session_id，清除嘗試計數
+    st.session_state.pop('_cookie_load_attempts', None)
 
     # 調用後端驗證（v4.3: POST + 可選二次驗證）
     logger.info(f"調用 /verify-session API (sid={session_id[:8]}...)")
@@ -342,7 +382,7 @@ def try_restore_session(api_base_url: str) -> bool:
         return True
     else:
         # 驗證失敗，清除存儲
-        logger.warning("❌ Session 驗證失敗，清除存儲")
+        logger.warning("Session 驗證失敗，清除存儲")
         clear_session_id()
         st.session_state.auth_restore_done = True
         return False

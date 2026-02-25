@@ -21,7 +21,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 # 導入認證和 API 客戶端
 from utils.auth import (
     init_session, is_authenticated, render_user_info_sidebar,
-    try_restore_session, login, inject_visibility_listener
+    try_restore_session, login, inject_visibility_listener,
+    render_loading_screen
 )
 from utils.api_client import APIClient
 
@@ -1007,17 +1008,20 @@ def main():
     """
     init_session()
 
-    # 嘗試恢復登入狀態
-    # v3.0: 使用 st.query_params + Cookie 雙層讀取，最多 3 次重試
+    # 嘗試恢復登入狀態（v4.4: 支援 Cookie 組件非同步載入）
     try_restore_session(API_BASE_URL)
-
-    # 注入頁面可見性監聯器（在恢復完成後注入）
-    inject_visibility_listener()
 
     # 檢查登入狀態
     if not is_authenticated():
+        if not st.session_state.get('auth_restore_done'):
+            # Cookie 組件尚未從瀏覽器載入，顯示載入畫面
+            # 組件載入完成後會自動觸發 rerun
+            render_loading_screen()
+            st.stop()
         auth_page()
     else:
+        # 注入頁面可見性監聯器（在恢復完成後注入）
+        inject_visibility_listener()
         v7_monitor_page()
 
 # ==================== 主程式入口 ====================
