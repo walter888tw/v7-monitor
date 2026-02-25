@@ -63,14 +63,13 @@ def _get_cookie_manager():
 
 def _save_session_js(session_id: str):
     """
-    使用 JavaScript 直接保存 Session ID（v4.5 新增）
+    使用 JavaScript 直接保存 Session ID（v4.6 修正）
 
-    同時寫入三個存儲位置：
-    - sessionStorage: F5 重整安全（同一分頁持續）
-    - localStorage: 跨會話持續（關閉分頁後仍在）
-    - Cookie: 備援（供 CookieManager 讀取）
-
-    比 CookieManager 更可靠，因為直接在瀏覽器主框架執行 JavaScript。
+    v4.6 修正：
+    - components.html() 的 srcdoc iframe 有 opaque origin，
+      其 sessionStorage/localStorage 對 app iframe 不可見。
+    - 必須透過 window.parent / window.top 寫入 app iframe 的 storage。
+    - 同時嘗試 window / window.parent / window.top，以 try-catch 容錯。
     """
     max_age = COOKIE_EXPIRY_DAYS * 86400  # 秒
     js = f"""
@@ -78,9 +77,16 @@ def _save_session_js(session_id: str):
     (function() {{
         var key = '{COOKIE_NAME}';
         var val = '{session_id}';
-        try {{ sessionStorage.setItem(key, val); }} catch(e) {{}}
-        try {{ localStorage.setItem(key, val); }} catch(e) {{}}
-        try {{ document.cookie = key + '=' + encodeURIComponent(val) + '; max-age={max_age}; path=/; SameSite=Lax'; }} catch(e) {{}}
+        var maxAge = {max_age};
+        var targets = [window];
+        try {{ if (window.parent && window.parent !== window) targets.push(window.parent); }} catch(e) {{}}
+        try {{ if (window.top && window.top !== window && window.top !== window.parent) targets.push(window.top); }} catch(e) {{}}
+        for (var i = 0; i < targets.length; i++) {{
+            var w = targets[i];
+            try {{ w.sessionStorage.setItem(key, val); }} catch(e) {{}}
+            try {{ w.localStorage.setItem(key, val); }} catch(e) {{}}
+            try {{ w.document.cookie = key + '=' + encodeURIComponent(val) + '; max-age=' + maxAge + '; path=/; SameSite=Lax'; }} catch(e) {{}}
+        }}
     }})();
     </script>
     """
@@ -89,15 +95,12 @@ def _save_session_js(session_id: str):
 
 def _read_session_id_js() -> Optional[str]:
     """
-    使用 JavaScript 直接從瀏覽器讀取 Session ID（v4.5 新增）
+    使用 JavaScript 直接從瀏覽器讀取 Session ID（v4.6 修正）
 
-    讀取優先順序：
-    1. sessionStorage（F5 安全，最快）
-    2. localStorage（跨會話持續）
-    3. Cookie（備援）
-
-    使用 streamlit_js_eval 執行 JS 並回傳結果。
-    注意：首次 render 返回 0（JS 尚未執行），需等 rerun 後才有值。
+    v4.6 修正：
+    - streamlit_js_eval 也在 component iframe 中執行，
+      其 sessionStorage/localStorage 可能是隔離的 opaque origin。
+    - 必須同時嘗試 window / window.parent / window.top 讀取。
     """
     try:
         from streamlit_js_eval import streamlit_js_eval
@@ -106,25 +109,31 @@ def _read_session_id_js() -> Optional[str]:
         (function() {{
             var key = '{COOKIE_NAME}';
             var minLen = 20;
-            try {{
-                var s = sessionStorage.getItem(key);
-                if (s && s.length >= minLen) return s;
-            }} catch(e) {{}}
-            try {{
-                var l = localStorage.getItem(key);
-                if (l && l.length >= minLen) return l;
-            }} catch(e) {{}}
-            try {{
-                var prefix = key + '=';
-                var cookies = document.cookie.split(';');
-                for (var i = 0; i < cookies.length; i++) {{
-                    var c = cookies[i].trim();
-                    if (c.indexOf(prefix) === 0) {{
-                        var val = decodeURIComponent(c.substring(prefix.length));
-                        if (val.length >= minLen) return val;
+            var targets = [window];
+            try {{ if (window.parent && window.parent !== window) targets.push(window.parent); }} catch(e) {{}}
+            try {{ if (window.top && window.top !== window && window.top !== window.parent) targets.push(window.top); }} catch(e) {{}}
+            for (var t = 0; t < targets.length; t++) {{
+                var w = targets[t];
+                try {{
+                    var s = w.sessionStorage.getItem(key);
+                    if (s && s.length >= minLen) return s;
+                }} catch(e) {{}}
+                try {{
+                    var l = w.localStorage.getItem(key);
+                    if (l && l.length >= minLen) return l;
+                }} catch(e) {{}}
+                try {{
+                    var prefix = key + '=';
+                    var cookies = w.document.cookie.split(';');
+                    for (var i = 0; i < cookies.length; i++) {{
+                        var c = cookies[i].trim();
+                        if (c.indexOf(prefix) === 0) {{
+                            var val = decodeURIComponent(c.substring(prefix.length));
+                            if (val.length >= minLen) return val;
+                        }}
                     }}
-                }}
-            }} catch(e) {{}}
+                }} catch(e) {{}}
+            }}
             return '';
         }})()
         """
@@ -146,15 +155,21 @@ def _read_session_id_js() -> Optional[str]:
 
 def _clear_session_js():
     """
-    使用 JavaScript 清除所有 Session 存儲（v4.5 新增）
+    使用 JavaScript 清除所有 Session 存儲（v4.6 修正）
     """
     js = f"""
     <script>
     (function() {{
         var key = '{COOKIE_NAME}';
-        try {{ sessionStorage.removeItem(key); }} catch(e) {{}}
-        try {{ localStorage.removeItem(key); }} catch(e) {{}}
-        try {{ document.cookie = key + '=; max-age=0; path=/'; }} catch(e) {{}}
+        var targets = [window];
+        try {{ if (window.parent && window.parent !== window) targets.push(window.parent); }} catch(e) {{}}
+        try {{ if (window.top && window.top !== window && window.top !== window.parent) targets.push(window.top); }} catch(e) {{}}
+        for (var i = 0; i < targets.length; i++) {{
+            var w = targets[i];
+            try {{ w.sessionStorage.removeItem(key); }} catch(e) {{}}
+            try {{ w.localStorage.removeItem(key); }} catch(e) {{}}
+            try {{ w.document.cookie = key + '=; max-age=0; path=/'; }} catch(e) {{}}
+        }}
     }})();
     </script>
     """
