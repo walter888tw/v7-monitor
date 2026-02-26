@@ -452,8 +452,45 @@ def render_user_info_sidebar(api_base_url: str):
             logout(api_base_url)
 
 
+def _render_forgot_password_form(api_base_url: str):
+    """渲染忘記密碼表單"""
+    st.markdown("#### 忘記密碼")
+    st.markdown("請輸入您的 Email，我們將發送密碼重置連結到您的信箱。")
+
+    reset_email = st.text_input("Email", key="forgot_email")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("發送重置連結", use_container_width=True, key="forgot_submit"):
+            if not reset_email:
+                st.error("請輸入 Email")
+                return
+            try:
+                import requests as req_lib
+                resp = req_lib.post(
+                    f"{api_base_url}/auth/forgot-password",
+                    json={"email": reset_email},
+                    timeout=10
+                )
+                if resp.status_code == 200:
+                    st.success("如果該帳號存在，重置連結已發送至您的信箱。請檢查收件匣（及垃圾郵件資料夾）。")
+                else:
+                    st.error("發送失敗，請稍後再試")
+            except Exception:
+                st.error("無法連接伺服器，請稍後再試")
+    with col2:
+        if st.button("返回登入", use_container_width=True, key="forgot_back"):
+            st.session_state.show_forgot_password = False
+            st.rerun()
+
+
 def render_login_form(api_base_url: str) -> bool:
     """渲染登入表單"""
+    # 忘記密碼模式
+    if st.session_state.get("show_forgot_password"):
+        _render_forgot_password_form(api_base_url)
+        return False
+
     st.markdown("#### 用戶登入")
 
     email = st.text_input("Email", key="login_email")
@@ -474,6 +511,18 @@ def render_login_form(api_base_url: str) -> bool:
         else:
             st.error(result["message"])
             return False
+
+    # 忘記密碼連結
+    st.markdown(
+        '<div style="text-align:center;margin-top:8px;">'
+        '<a href="?forgot=1" target="_self" style="color:#888;font-size:14px;">忘記密碼？</a>'
+        '</div>',
+        unsafe_allow_html=True
+    )
+    if st.query_params.get("forgot") == "1":
+        st.session_state.show_forgot_password = True
+        st.query_params.clear()
+        st.rerun()
 
     return False
 
