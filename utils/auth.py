@@ -76,20 +76,32 @@ def _browser_storage_sync() -> Optional[str]:
         """
         st.session_state.pop('_sid_clear_pending', None)
 
-    elif current_sid and len(current_sid) >= 20 and remember:
+    elif current_sid and len(current_sid) >= 20:
         # === WRITE 模式 ===
+        # 一律寫入 sessionStorage（F5/Ctrl+R 保護）
+        # 勾選「記住我」時額外寫入 localStorage + Cookie（關閉瀏覽器後仍保留）
         max_age = COOKIE_EXPIRY_DAYS * 86400
-        js = f"""
-        (function() {{
-            var key = '{COOKIE_NAME}';
-            var val = '{current_sid}';
-            var maxAge = {max_age};
-            try {{ sessionStorage.setItem(key, val); }} catch(e) {{}}
-            try {{ localStorage.setItem(key, val); }} catch(e) {{}}
-            try {{ document.cookie = key + '=' + encodeURIComponent(val) + '; max-age=' + maxAge + '; path=/; SameSite=Lax'; }} catch(e) {{}}
-            return val;
-        }})()
-        """
+        if remember:
+            js = f"""
+            (function() {{
+                var key = '{COOKIE_NAME}';
+                var val = '{current_sid}';
+                var maxAge = {max_age};
+                try {{ sessionStorage.setItem(key, val); }} catch(e) {{}}
+                try {{ localStorage.setItem(key, val); }} catch(e) {{}}
+                try {{ document.cookie = key + '=' + encodeURIComponent(val) + '; max-age=' + maxAge + '; path=/; SameSite=Lax'; }} catch(e) {{}}
+                return val;
+            }})()
+            """
+        else:
+            js = f"""
+            (function() {{
+                var key = '{COOKIE_NAME}';
+                var val = '{current_sid}';
+                try {{ sessionStorage.setItem(key, val); }} catch(e) {{}}
+                return val;
+            }})()
+            """
 
     else:
         # === READ 模式 ===
