@@ -735,8 +735,9 @@ def render_credit_risk_panel():
         error_type = "timeout"
     except requests.exceptions.ConnectionError:
         error_type = "connection"
-    except Exception:
+    except Exception as e:
         error_type = "unknown"
+        print(f"[credit-risk] exception: {type(e).__name__}: {e}")
 
     # 快取 fallback
     if data and data.get('success'):

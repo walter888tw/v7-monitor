@@ -371,15 +371,15 @@ class APIClient:
     def get_credit_risk(self) -> Optional[Dict[str, Any]]:
         """獲取全球信用風險預警儀表板數據
 
+        不吞異常 — 讓呼叫端的 try/except 能區分 timeout/connection/unknown。
+
         Returns:
-            包含 success, scorecard, indicators, market_data, news 的字典，失敗返回 None
+            包含 success, scorecard, indicators, market_data, news 的字典
         """
-        try:
-            response = self._request('GET', '/v7/credit-risk', timeout=20)
-            if response.status_code == 200:
-                return response.json()
-        except Exception:
-            pass
+        response = self._request('GET', '/v7/credit-risk', timeout=20)
+        if response.status_code == 200:
+            return response.json()
+        print(f"[credit-risk] API returned {response.status_code}")
         return None
 
     def get_vix_history(self, days: int = 30) -> Optional[Dict[str, Any]]:
