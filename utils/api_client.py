@@ -368,6 +368,20 @@ class APIClient:
             pass
         return None
 
+    def get_credit_risk(self) -> Optional[Dict[str, Any]]:
+        """獲取全球信用風險預警儀表板數據
+
+        Returns:
+            包含 success, scorecard, indicators, market_data, news 的字典，失敗返回 None
+        """
+        try:
+            response = self._request('GET', '/v7/credit-risk', timeout=20)
+            if response.status_code == 200:
+                return response.json()
+        except Exception:
+            pass
+        return None
+
     def get_vix_history(self, days: int = 30) -> Optional[Dict[str, Any]]:
         """獲取歷史日線 VIX 數據
 

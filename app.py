@@ -12,8 +12,9 @@ import requests
 from pathlib import Path
 from datetime import datetime, time, timedelta
 import time as pytime
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import plotly.graph_objects as go
+import html as html_module
 
 # 添加 utils 到路徑
 sys.path.insert(0, str(Path(__file__).parent))
@@ -235,6 +236,126 @@ st.markdown("""
     height: 50px;
     background: #ff6b6b;
 }
+
+/* 信用風險預警面板 v3.0 — 五級燈號 + WCAG AA + 色盲友善 */
+.cr-header {
+    padding: 18px 20px;
+    border-radius: 12px;
+    margin: 10px 0;
+    text-align: center;
+    font-weight: bold;
+}
+.cr-header.double_red { background: linear-gradient(135deg, #8b0000 0%, #ff0000 100%); color: white; }
+.cr-header.red { background: linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%); color: white; }
+.cr-header.orange { background: linear-gradient(135deg, #f7971e 0%, #ffd200 100%); color: #333; }
+.cr-header.yellow { background: linear-gradient(135deg, #f5c842 0%, #e6a817 100%); color: #333; }
+.cr-header.green { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; }
+
+.cr-card {
+    padding: 12px 16px;
+    border-radius: 10px;
+    margin: 6px 0;
+}
+/* P0 色盲友善: border-style 區分燈號 (solid/dashed/double) */
+.cr-card.green { background: rgba(56,239,125,0.08); border-left: 4px solid #38ef7d; }
+.cr-card.yellow { background: rgba(245,200,66,0.08); border-left: 4px solid #e6a817; }
+.cr-card.orange { background: rgba(247,151,30,0.08); border-left: 4px dashed #f7971e; }
+.cr-card.red { background: rgba(255,65,108,0.08); border-left: 4px double #ff416c; }
+.cr-card.double_red { background: rgba(139,0,0,0.10); border-left: 6px double #8b0000; }
+.cr-card.pending { background: rgba(150,150,150,0.06); border-left: 4px dotted #999; }
+.cr-card.unknown { background: rgba(150,150,150,0.04); border-left: 4px dotted #ccc; }
+
+.cr-title {
+    font-size: 14px; font-weight: 600; margin-bottom: 6px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.cr-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 600; line-height: 1.4;
+}
+.cr-badge.green { background: rgba(56,239,125,0.15); color: #0a8f3f; }
+.cr-badge.yellow { background: rgba(245,200,66,0.18); color: #8a6d00; }
+.cr-badge.orange { background: rgba(247,151,30,0.15); color: #c26200; }
+.cr-badge.red { background: rgba(255,65,108,0.15); color: #d32f2f; }
+.cr-badge.double_red { background: rgba(139,0,0,0.18); color: #8b0000; }
+.cr-badge.pending { background: rgba(150,150,150,0.10); color: #888; }
+.cr-badge.unknown { background: rgba(150,150,150,0.08); color: #aaa; }
+
+/* P0 WCAG AA: #555 on white = 7.46:1 */
+.cr-tree {
+    font-family: 'Cascadia Code', 'Consolas', 'Monaco', monospace;
+    font-size: 12px; color: #555; line-height: 1.7; white-space: pre-wrap;
+}
+.cr-tree .val-up { color: #0a8f3f; font-weight: 600; }
+.cr-tree .val-dn { color: #d32f2f; font-weight: 600; }
+.cr-tree .val-neutral { color: #666; }
+
+.cr-trigger {
+    font-size: 12px; color: #b8860b; margin-top: 6px;
+    background: rgba(245,200,66,0.08); border-left: 3px solid #e6a817;
+    padding: 4px 8px; border-radius: 0 4px 4px 0;
+}
+
+.cr-ticker {
+    display: inline-block; padding: 2px 7px; border-radius: 5px;
+    font-size: 11px; font-weight: 500; margin: 1px;
+}
+.cr-ticker.up { background: rgba(56,239,125,0.12); color: #0a8f3f; }
+.cr-ticker.down { background: rgba(255,65,108,0.12); color: #d32f2f; }
+.cr-ticker.flat { background: rgba(150,150,150,0.08); color: #888; }
+
+.cr-news {
+    padding: 6px 10px; border-radius: 6px; margin: 3px 0;
+    background: rgba(47,128,237,0.04); border-left: 3px solid #2f80ed; font-size: 12px;
+}
+.cr-news a { color: #2f80ed; text-decoration: none; }
+.cr-news-meta { font-size: 10px; color: #888; }
+
+/* P2 概覽列 */
+.cr-summary-bar {
+    display: flex; justify-content: center; gap: 12px;
+    padding: 8px 0; margin-bottom: 4px;
+}
+.cr-summary-dot {
+    width: 14px; height: 14px; border-radius: 50%;
+    display: inline-block; border: 2px solid rgba(255,255,255,0.3);
+}
+.cr-summary-dot.green { background: #38ef7d; }
+.cr-summary-dot.yellow { background: #e6a817; }
+.cr-summary-dot.orange { background: #f7971e; }
+.cr-summary-dot.red { background: #ff416c; }
+.cr-summary-dot.double_red { background: #8b0000; }
+.cr-summary-dot.pending { background: #999; }
+
+/* P2 手機端 */
+@media (max-width: 640px) {
+    .cr-header { padding: 12px 14px; }
+    .cr-header > div:first-child { font-size: 15px !important; }
+    .cr-card { padding: 10px 12px; }
+    .cr-tree { font-size: 11px; }
+    .cr-trigger { font-size: 11px; }
+    .cr-title { font-size: 13px; }
+}
+
+/* P1 暗色模式 */
+@media (prefers-color-scheme: dark) {
+    .cr-tree { color: #ccc; }
+    .cr-tree .val-up { color: #4cdf8f; }
+    .cr-tree .val-dn { color: #ff7b7b; }
+    .cr-trigger { color: #e6c55a; background: rgba(245,200,66,0.12); }
+    .cr-card.green { background: rgba(56,239,125,0.12); }
+    .cr-card.yellow { background: rgba(245,200,66,0.12); }
+    .cr-card.orange { background: rgba(247,151,30,0.12); }
+    .cr-card.red { background: rgba(255,65,108,0.12); }
+    .cr-card.double_red { background: rgba(139,0,0,0.15); }
+    .cr-news { background: rgba(47,128,237,0.08); }
+    .cr-news-meta { color: #aaa; }
+    .cr-badge.green { background: rgba(56,239,125,0.20); color: #4cdf8f; }
+    .cr-badge.yellow { background: rgba(245,200,66,0.22); color: #e6c55a; }
+    .cr-badge.orange { background: rgba(247,151,30,0.20); color: #f7971e; }
+    .cr-badge.red { background: rgba(255,65,108,0.20); color: #ff7b7b; }
+    .cr-badge.double_red { background: rgba(139,0,0,0.22); color: #ff5555; }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -247,6 +368,8 @@ if 'signal_history' not in st.session_state:
     st.session_state.signal_history = []
 if 'auto_refresh_enabled' not in st.session_state:
     st.session_state.auto_refresh_enabled = True
+if 'credit_risk_cache' not in st.session_state:
+    st.session_state.credit_risk_cache = None
 
 # ==================== 工具函數 ====================
 def get_taiwan_now() -> datetime:
@@ -597,6 +720,339 @@ def render_treasury_yield(market_data: Optional[Dict] = None):
             st.caption("🕐 最後更新: N/A")
     with col4:
         st.empty()
+
+
+def render_credit_risk_panel():
+    """渲染全球信用風險預警面板 v3.0 — 五級燈號 + XSS 防護 + 快取 fallback"""
+    _esc = html_module.escape
+
+    # ==================== 取得數據（區分錯誤類型）====================
+    data = None
+    error_type = None
+    try:
+        data = api_client.get_credit_risk()
+    except requests.exceptions.Timeout:
+        error_type = "timeout"
+    except requests.exceptions.ConnectionError:
+        error_type = "connection"
+    except Exception:
+        error_type = "unknown"
+
+    # 快取 fallback
+    if data and data.get('success'):
+        st.session_state['credit_risk_cache'] = data
+    elif st.session_state.get('credit_risk_cache'):
+        data = st.session_state['credit_risk_cache']
+        error_type = "cached"
+
+    if not data or not data.get('success'):
+        if error_type == "timeout":
+            st.caption("⏳ 信用風險預警：API 回應超時，稍後重試...")
+        elif error_type == "connection":
+            st.caption("🔌 信用風險預警：連線失敗，請檢查網路...")
+        else:
+            st.caption("📡 信用風險預警：資料載入中...")
+        return
+
+    scorecard = data.get('scorecard', {})
+    indicators = data.get('indicators', {})
+    news = data.get('news', [])
+    timestamp = data.get('timestamp', '')
+
+    overall_status = scorecard.get('overall_status', 'green')
+    overall_label = scorecard.get('overall_label', '🟢 綠燈')
+    overall_msg = scorecard.get('overall_message', '')
+
+    # ==================== 概覽圓點 ====================
+    dot_order = ["treasury", "banks", "loans", "bdc", "cockroach", "tsm_adr"]
+    dot_labels = {"treasury": "美債", "banks": "銀行", "loans": "貸款", "bdc": "BDC", "cockroach": "蟑螂", "tsm_adr": "ADR"}
+    dots_html = ""
+    for dk in dot_order:
+        ds = indicators.get(dk, {}).get('status', 'pending')
+        dl = dot_labels.get(dk, dk)
+        dots_html += f'<span class="cr-summary-dot {ds}" title="{dl}"></span>'
+
+    cached_tag = ' <span style="font-size:10px;opacity:0.7;">(快取)</span>' if error_type == "cached" else ""
+
+    # ==================== 頂部警戒橫幅 ====================
+    st.markdown(f"""
+    <div class="cr-header {overall_status}">
+        <div style="font-size: 18px;">🚨 私募信貸危機監控 — 阿水週報</div>
+        <div style="font-size: 15px; margin-top: 4px;">
+            {_esc(overall_label)} — {_esc(overall_msg)}
+        </div>
+        <div class="cr-summary-bar">{dots_html}</div>
+        <div style="font-size: 12px; opacity: 0.85;">
+            ⑤PIK ⑥13F 待季報 | 🕐 {_esc(timestamp)}{cached_tag}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ==================== 五大活躍指標（明確分欄）====================
+    left_keys = [
+        ("treasury", "① 美債10Y殖利率"),
+        ("banks",    "② KBW銀行指數"),
+        ("loans",    "④ 軟體貸款壓力"),
+    ]
+    right_keys = [
+        ("bdc",       "③ BDC壓力指標"),
+        ("cockroach", "⑦ 信貸蟑螂追蹤"),
+        ("tsm_adr",   "⑧ 台積電ADR溢價"),
+    ]
+
+    col_left, col_right = st.columns(2)
+
+    for col, keys in [(col_left, left_keys), (col_right, right_keys)]:
+        with col:
+            for key, title in keys:
+                ind = indicators.get(key, {})
+                status = ind.get('status', 'unknown')
+                label = ind.get('label', '—')
+                triggers = ind.get('triggers', [])
+                metrics = ind.get('metrics', {})
+
+                tree_html = _build_tree_lines_html(key, metrics)
+
+                trigger_html = ""
+                if triggers:
+                    trigger_text = " | ".join(_esc(str(t)) for t in triggers[:3])
+                    trigger_html = f'<div class="cr-trigger">▸ {trigger_text}</div>'
+
+                badge_html = f'<span class="cr-badge {status}">{_esc(label)}</span>'
+
+                card_html = f"""
+                <div class="cr-card {status}">
+                    <div class="cr-title"><span>{title}</span>{badge_html}</div>
+                    <div class="cr-tree">{tree_html}</div>
+                    {trigger_html}
+                </div>
+                """
+                st.markdown(card_html, unsafe_allow_html=True)
+
+    # ==================== ⑤⑥ 待審指標合併為一行 ====================
+    pik_label = indicators.get('pik', {}).get('label', '待季報')
+    f13_label = indicators.get('13f', {}).get('label', '待季報')
+    st.caption(f"⑤ PIK比率：{pik_label} | ⑥ 13F持倉：{f13_label}")
+
+    # ==================== 信用利差獨立顯示 ====================
+    loan_m = indicators.get('loans', {}).get('metrics', {})
+    hy_bps = loan_m.get('hy_oas_bps')
+    ccc_bps = loan_m.get('ccc_oas_bps')
+    if hy_bps is not None or ccc_bps is not None:
+        spread_parts = []
+        if hy_bps is not None:
+            spread_parts.append(f"HY OAS: {hy_bps:.0f} bps")
+        if ccc_bps is not None:
+            spread_parts.append(f"CCC OAS: {ccc_bps:.0f} bps")
+        st.caption(f"📊 信用利差 — {' | '.join(spread_parts)}")
+
+    # ==================== 蟑螂事件明細（近30天展開）====================
+    cockroach_metrics = indicators.get('cockroach', {}).get('metrics', {})
+    events = cockroach_metrics.get('events', [])
+    if events:
+        cutoff = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        recent = [e for e in events if e.get('date', '') >= cutoff]
+        older = [e for e in events if e.get('date', '') < cutoff]
+
+        def _render_event_html(ev_list):
+            parts = []
+            for ev in ev_list:
+                type_icon = {"A": "🔴", "B": "🟠", "C": "🟡"}.get(ev.get("type", "C"), "⚪")
+                parts.append(f'<div class="cr-news">'
+                    f'{type_icon} [{_esc(str(ev.get("date","")))}] '
+                    f'<b>{_esc(str(ev.get("entity","")))}</b>'
+                    f'（{_esc(str(ev.get("country","")))}）'
+                    f'— Type {_esc(str(ev.get("type","")))}（權重{ev.get("weight",0)}）'
+                    f'<div class="cr-news-meta">{_esc(str(ev.get("desc","")))}</div>'
+                    f'</div>')
+            return "\n".join(parts)
+
+        if recent:
+            st.markdown(f"**🪳 近30天事件（{len(recent)} 起）**")
+            st.markdown(_render_event_html(recent), unsafe_allow_html=True)
+        if older:
+            with st.expander(f"🪳 較早事件（{len(older)} 起，30天前）", expanded=False):
+                st.markdown(_render_event_html(older), unsafe_allow_html=True)
+
+    # ==================== 信貸風險新聞（合併 markdown）====================
+    if news:
+        with st.expander(f"📰 信貸風險新聞（{len(news)} 則）", expanded=False):
+            news_parts = []
+            for item in news:
+                link = _esc(str(item.get('link', '')))
+                title_text = _esc(str(item.get('title', '')))
+                source = _esc(str(item.get('source', '')))
+                published = _esc(str(item.get('published', '')))
+                news_parts.append(
+                    f'<div class="cr-news">'
+                    f'<a href="{link}" target="_blank">{title_text}</a>'
+                    f'<div class="cr-news-meta">{source} · {published}</div>'
+                    f'</div>')
+            st.markdown("\n".join(news_parts), unsafe_allow_html=True)
+
+
+def _fmt_val(val, fmt="+.1f", suffix="%", invert=False):
+    """格式化數值並加上漲跌顏色 span。invert=True 表示上升為負面（如殖利率上升）"""
+    if val is None:
+        return '<span class="val-neutral">—</span>'
+    s = f"{val:{fmt}}{suffix}"
+    if invert:
+        cls = "val-dn" if val > 0 else "val-up" if val < 0 else "val-neutral"
+    else:
+        cls = "val-up" if val > 0 else "val-dn" if val < 0 else "val-neutral"
+    arrow = "↑" if val > 0 else "↓" if val < 0 else ""
+    return f'<span class="{cls}">{arrow}{s}</span>'
+
+
+def _ticker_span(ticker, change_pct):
+    """建構 ticker badge HTML"""
+    if change_pct is None:
+        return f'<span class="cr-ticker flat">{ticker}:—</span>'
+    cls = "up" if change_pct > 0 else "down" if change_pct < 0 else "flat"
+    return f'<span class="cr-ticker {cls}">{ticker}:{change_pct:+.1f}%</span>'
+
+
+def _tree_auto(items):
+    """自動為樹狀行加上 ├─/└─ 前綴"""
+    if not items:
+        return ""
+    result = []
+    for i, item in enumerate(items):
+        prefix = "└─" if i == len(items) - 1 else "├─"
+        result.append(f"{prefix} {item}")
+    return "\n".join(result)
+
+
+def _build_tree_lines_html(key: str, m: Dict) -> str:
+    """根據指標類型建構 HTML 樹狀顯示（含漲跌顏色+箭頭）"""
+    items = []
+
+    if key == "treasury":
+        y10 = m.get("yield_10y")
+        if y10 is not None:
+            items.append(f"10Y殖利率：{y10:.2f}%")
+        cpi = m.get("core_cpi_yoy")
+        ry = m.get("real_yield")
+        if cpi is not None and ry is not None:
+            items.append(f"核心CPI：{cpi:.1f}% → 實質利率：{_fmt_val(ry, '+.2f')}")
+        sp = m.get("spread_2s10s")
+        if sp is not None:
+            desc = "正斜率" if sp > 0.3 else "趨平" if sp > 0 else "倒掛"
+            items.append(f"2s10s利差：{_fmt_val(sp, '+.2f')}（{desc}）")
+        chg = m.get("yield_change_30d")
+        if chg is not None:
+            items.append(f"30日變動：{_fmt_val(chg, '+.2f', invert=True)}")
+
+    elif key == "banks":
+        p = m.get("bkx_price")
+        if p:
+            items.append(f"BKX：{p:.1f}")
+        c20 = m.get("bkx_change_20d")
+        if c20 is not None:
+            items.append(f"20日漲跌：{_fmt_val(c20)}")
+        vs = m.get("bkx_vs_sp500_20d")
+        if vs is not None:
+            tag = "落後" if vs < 0 else "領先"
+            items.append(f"vs S&amp;P500：{_fmt_val(vs)}（{tag}大盤）")
+        h52 = m.get("bkx_from_52w_high")
+        if h52 is not None:
+            items.append(f"距52週高點：{_fmt_val(h52)}")
+        exposed = m.get("exposed_banks", {})
+        if exposed:
+            parts = [_ticker_span(t, d.get("change_5d_pct")) for t, d in exposed.items()]
+            items.append(f"曝險5日：{' '.join(parts)}")
+
+    elif key == "bdc":
+        bp = m.get("bizd_price")
+        c20 = m.get("bizd_change_20d")
+        h52 = m.get("bizd_from_52w_high")
+        if bp:
+            parts = [f"BIZD ${bp:.2f}"]
+            if c20 is not None:
+                parts.append(f"20日{_fmt_val(c20)}")
+            if h52 is not None:
+                parts.append(f"52高{_fmt_val(h52)}")
+            items.append(" | ".join(parts))
+        avg = m.get("pe_avg_20d")
+        if avg is not None:
+            items.append(f"PE巨頭20日平均：{_fmt_val(avg)}")
+        pe_stocks = m.get("pe_stocks", {})
+        if pe_stocks:
+            parts = [_ticker_span(t, d.get("change_1d_pct")) for t, d in pe_stocks.items()]
+            items.append(f"  {' '.join(parts)}")
+        rc = m.get("redemption_count", 0)
+        ac = m.get("activist_count", 0)
+        items.append(f"贖回事件：{rc}起 | 激進投資者：{ac}起")
+
+    elif key == "loans":
+        igv_p = m.get("igv_price")
+        igv_ytd = m.get("igv_change_ytd")
+        igv_20d = m.get("igv_change_20d")
+        if igv_p:
+            parts = [f"IGV ${igv_p:.2f}"]
+            if igv_ytd is not None:
+                parts.append(f"YTD{_fmt_val(igv_ytd)}")
+            if igv_20d is not None:
+                parts.append(f"20日{_fmt_val(igv_20d)}")
+            items.append(" | ".join(parts))
+        igv_52 = m.get("igv_from_52w_high")
+        if igv_52 is not None:
+            items.append(f"IGV距52週高點：{_fmt_val(igv_52)}")
+        bkln = m.get("bkln_price")
+        if bkln:
+            items.append(f"BKLN：${bkln:.2f}")
+        hy = m.get("hy_oas_bps")
+        ccc = m.get("ccc_oas_bps")
+        if hy is not None or ccc is not None:
+            parts = []
+            if hy is not None:
+                parts.append(f"HY:{hy:.0f}bps")
+            if ccc is not None:
+                parts.append(f"CCC:{ccc:.0f}bps")
+            items.append(f"信用利差：{' | '.join(parts)}")
+
+    elif key == "cockroach":
+        cnt = m.get("cockroach_count", 0)
+        sc = m.get("cockroach_score", 0)
+        items.append(f"180天事件：{cnt}起（加權分數：{sc}）")
+        r30 = m.get("recent_30d_count", 0)
+        items.append(f"近30天：{r30}起")
+        geo = m.get("geography_spread", 0)
+        countries = m.get("countries", [])
+        items.append(f"地理分布：{geo}個（{', '.join(countries)}）")
+
+    elif key == "tsm_adr":
+        prem = m.get("premium_pct")
+        hi = m.get("premium_high_90d")
+        lo = m.get("premium_low_90d")
+        if prem is not None:
+            rng = f"（90天：{lo:.1f}% ~ {hi:.1f}%）" if (hi is not None and lo is not None) else ""
+            items.append(f"ADR 溢價：{_fmt_val(prem, '+.1f', '%', invert=True)} {rng}")
+        tsm_p = m.get("tsm_adr_price")
+        implied = m.get("adr_implied_twd")
+        fx = m.get("usdtwd_rate")
+        if tsm_p is not None and implied is not None and fx is not None:
+            items.append(f"TSM ${tsm_p:.2f} → NT${implied:,.0f}（÷5×{fx:.2f}）")
+        chg30 = m.get("premium_change_30d")
+        if chg30 is not None:
+            items.append(f"30日溢價變動：{_fmt_val(chg30, '+.1f', 'pp', invert=True)}")
+        chg60 = m.get("premium_change_60d")
+        if chg60 is not None:
+            items.append(f"60日溢價變動：{_fmt_val(chg60, '+.1f', 'pp', invert=True)}")
+        adr_chg = m.get("tsm_adr_change_20d")
+        tw_chg = m.get("tw_2330_change_20d")
+        div = m.get("divergence_ratio")
+        if adr_chg is not None and tw_chg is not None:
+            div_str = f"（{div:.1f}倍）" if div is not None else ""
+            items.append(f"跌幅分歧：ADR {_fmt_val(adr_chg)} vs 台股 {_fmt_val(tw_chg)} {div_str}")
+
+    elif key == "pik":
+        items.append("數據源：BDC季報（Q1數據4-5月公布）")
+
+    elif key == "13f":
+        items.append("數據源：SEC EDGAR（截止日2026-05-15）")
+
+    return _tree_auto(items)
 
 
 def render_market_data(market_data: Dict):
@@ -968,6 +1424,11 @@ def v7_monitor_page():
     # 美債殖利率（始終顯示，不依賴分析結果）
     analysis_market_data = result.get('market_data') if (result and result.get('success')) else None
     render_treasury_yield(analysis_market_data)
+
+    st.markdown("---")
+
+    # 全球信用風險預警面板（始終顯示，不依賴分析結果）
+    render_credit_risk_panel()
 
     st.markdown("---")
 
