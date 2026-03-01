@@ -271,7 +271,7 @@ st.markdown("""
 }
 .cr-badge {
     display: inline-block; padding: 2px 8px; border-radius: 10px;
-    font-size: 11px; font-weight: 600; line-height: 1.4;
+    font-size: 12px; font-weight: 600; line-height: 1.4;
 }
 .cr-badge.green { background: rgba(56,239,125,0.15); color: #0a8f3f; }
 .cr-badge.yellow { background: rgba(245,200,66,0.18); color: #8a6d00; }
@@ -281,24 +281,39 @@ st.markdown("""
 .cr-badge.pending { background: rgba(150,150,150,0.10); color: #888; }
 .cr-badge.unknown { background: rgba(150,150,150,0.08); color: #aaa; }
 
+/* Headline 大字關鍵數字 */
+.cr-headline {
+    font-size: 20px; font-weight: 700; margin: 4px 0 6px 0;
+    font-family: 'Cascadia Code', 'Consolas', 'Monaco', monospace;
+    color: #333;
+}
+/* 趨勢標籤 */
+.cr-trend {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 600; line-height: 1.4;
+}
+.cr-trend.improving { background: rgba(56,239,125,0.12); color: #0a8f3f; }
+.cr-trend.worsening { background: rgba(255,65,108,0.12); color: #d32f2f; }
+.cr-trend.stable { background: rgba(150,150,150,0.08); color: #888; }
+
 /* P0 WCAG AA: #555 on white = 7.46:1 */
 .cr-tree {
     font-family: 'Cascadia Code', 'Consolas', 'Monaco', monospace;
-    font-size: 12px; color: #555; line-height: 1.7; white-space: pre-wrap;
+    font-size: 13px; color: #555; line-height: 1.8; white-space: pre-wrap;
 }
 .cr-tree .val-up { color: #0a8f3f; font-weight: 600; }
 .cr-tree .val-dn { color: #d32f2f; font-weight: 600; }
 .cr-tree .val-neutral { color: #666; }
 
 .cr-trigger {
-    font-size: 12px; color: #b8860b; margin-top: 6px;
+    font-size: 13px; color: #b8860b; margin-top: 6px;
     background: rgba(245,200,66,0.08); border-left: 3px solid #e6a817;
     padding: 4px 8px; border-radius: 0 4px 4px 0;
 }
 
 .cr-ticker {
     display: inline-block; padding: 2px 7px; border-radius: 5px;
-    font-size: 11px; font-weight: 500; margin: 1px;
+    font-size: 12px; font-weight: 500; margin: 1px;
 }
 .cr-ticker.up { background: rgba(56,239,125,0.12); color: #0a8f3f; }
 .cr-ticker.down { background: rgba(255,65,108,0.12); color: #d32f2f; }
@@ -332,13 +347,15 @@ st.markdown("""
     .cr-header { padding: 12px 14px; }
     .cr-header > div:first-child { font-size: 15px !important; }
     .cr-card { padding: 10px 12px; }
-    .cr-tree { font-size: 11px; }
-    .cr-trigger { font-size: 11px; }
+    .cr-headline { font-size: 17px; }
+    .cr-tree { font-size: 12px; }
+    .cr-trigger { font-size: 12px; }
     .cr-title { font-size: 13px; }
 }
 
 /* P1 暗色模式 */
 @media (prefers-color-scheme: dark) {
+    .cr-headline { color: #eee; }
     .cr-tree { color: #ccc; }
     .cr-tree .val-up { color: #4cdf8f; }
     .cr-tree .val-dn { color: #ff7b7b; }
@@ -355,6 +372,9 @@ st.markdown("""
     .cr-badge.orange { background: rgba(247,151,30,0.20); color: #f7971e; }
     .cr-badge.red { background: rgba(255,65,108,0.20); color: #ff7b7b; }
     .cr-badge.double_red { background: rgba(139,0,0,0.22); color: #ff5555; }
+    .cr-trend.improving { background: rgba(56,239,125,0.18); color: #4cdf8f; }
+    .cr-trend.worsening { background: rgba(255,65,108,0.18); color: #ff7b7b; }
+    .cr-trend.stable { background: rgba(150,150,150,0.12); color: #aaa; }
 }
 </style>
 """, unsafe_allow_html=True)
@@ -775,6 +795,22 @@ def render_credit_risk_panel():
 
     cached_tag = ' <span style="font-size:10px;opacity:0.7;">(快取)</span>' if error_type == "cached" else ""
 
+    # ==================== 趨勢摘要統計 ====================
+    improving_count = sum(1 for ind in indicators.values()
+                         if ind.get('trend', {}).get('direction') == 'improving')
+    worsening_count = sum(1 for ind in indicators.values()
+                         if ind.get('trend', {}).get('direction') == 'worsening')
+    stable_count = sum(1 for ind in indicators.values()
+                       if ind.get('trend', {}).get('direction') == 'stable')
+    trend_parts = []
+    if improving_count:
+        trend_parts.append(f'<span style="color:#4cdf8f;">↗改善 {improving_count}</span>')
+    if worsening_count:
+        trend_parts.append(f'<span style="color:#ff7b7b;">↘惡化 {worsening_count}</span>')
+    if stable_count:
+        trend_parts.append(f'<span style="opacity:0.8;">→持平 {stable_count}</span>')
+    trend_summary = f' | {" ".join(trend_parts)}' if trend_parts else ""
+
     # ==================== 頂部警戒橫幅 ====================
     st.markdown(f"""
     <div class="cr-header {overall_status}">
@@ -784,7 +820,7 @@ def render_credit_risk_panel():
         </div>
         <div class="cr-summary-bar">{dots_html}</div>
         <div style="font-size: 12px; opacity: 0.85;">
-            ⑤PIK ⑥13F 待季報 | 🕐 {_esc(timestamp)}{cached_tag}
+            ⑤PIK ⑥13F 待季報{trend_summary} | 🕐 {_esc(timestamp)}{cached_tag}
         </div>
     </div>
     """, unsafe_allow_html=True)
@@ -812,6 +848,7 @@ def render_credit_risk_panel():
                 triggers = ind.get('triggers', [])
                 metrics = ind.get('metrics', {})
 
+                headline_html = _build_headline_html(key, metrics)
                 tree_html = _build_tree_lines_html(key, metrics)
 
                 trigger_html = ""
@@ -821,9 +858,17 @@ def render_credit_risk_panel():
 
                 badge_html = f'<span class="cr-badge {status}">{_esc(label)}</span>'
 
+                # 趨勢箭頭
+                trend = ind.get('trend', {})
+                trend_dir = trend.get('direction', 'unknown')
+                trend_html = ""
+                if trend_dir in ("improving", "worsening", "stable"):
+                    trend_html = f'<span class="cr-trend {trend_dir}">{trend.get("arrow","")} {trend.get("label","")}</span>'
+
                 card_html = f"""
                 <div class="cr-card {status}">
-                    <div class="cr-title"><span>{title}</span>{badge_html}</div>
+                    <div class="cr-title"><span>{title}</span>{badge_html}{trend_html}</div>
+                    <div class="cr-headline">{headline_html}</div>
                     <div class="cr-tree">{tree_html}</div>
                     {trigger_html}
                 </div>
@@ -922,6 +967,47 @@ def _tree_auto(items):
         prefix = "└─" if i == len(items) - 1 else "├─"
         result.append(f"{prefix} {item}")
     return "\n".join(result)
+
+
+def _build_headline_html(key: str, m: Dict) -> str:
+    """建構卡片的大字關鍵數字區（20px Headline）"""
+    if key == "treasury":
+        y10 = m.get("yield_10y")
+        if y10 is not None:
+            return f'{y10:.2f}%'
+        return '—'
+    elif key == "banks":
+        p = m.get("bkx_price")
+        c20 = m.get("bkx_change_20d")
+        if p is not None:
+            chg = f' <span class="{"val-up" if c20 > 0 else "val-dn" if c20 < 0 else "val-neutral"}">{c20:+.1f}%</span>' if c20 is not None else ''
+            return f'{p:.1f}{chg}'
+        return '—'
+    elif key == "bdc":
+        p = m.get("bizd_price")
+        c20 = m.get("bizd_change_20d")
+        if p is not None:
+            chg = f' <span class="{"val-up" if c20 > 0 else "val-dn" if c20 < 0 else "val-neutral"}">{c20:+.1f}%</span>' if c20 is not None else ''
+            return f'${p:.2f}{chg}'
+        return '—'
+    elif key == "loans":
+        p = m.get("igv_price")
+        ytd = m.get("igv_change_ytd")
+        if p is not None:
+            chg = f' <span class="{"val-up" if ytd > 0 else "val-dn" if ytd < 0 else "val-neutral"}">YTD {ytd:+.1f}%</span>' if ytd is not None else ''
+            return f'${p:.2f}{chg}'
+        return '—'
+    elif key == "cockroach":
+        cnt = m.get("cockroach_count", 0)
+        sc = m.get("cockroach_score", 0)
+        return f'{cnt}起 <span style="opacity:0.7;">(分數:{sc})</span>'
+    elif key == "tsm_adr":
+        prem = m.get("premium_pct")
+        if prem is not None:
+            cls = "val-dn" if prem < 10 else "val-neutral" if prem < 20 else "val-up"
+            return f'<span class="{cls}">{prem:+.1f}%</span>'
+        return '—'
+    return ''
 
 
 def _build_tree_lines_html(key: str, m: Dict) -> str:
