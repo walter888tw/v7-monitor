@@ -81,8 +81,9 @@ def auth_page():
         st.markdown("#### 新用戶註冊")
 
         reg_email = st.text_input("Email", key="reg_email")
-        reg_username = st.text_input("用戶名", key="reg_username")
-        reg_password = st.text_input("密碼（至少8位，包含字母和數字）", type="password", key="reg_password")
+        reg_username = st.text_input("用戶名（字母、數字、底線）", key="reg_username")
+        reg_password = st.text_input("密碼", type="password", key="reg_password")
+        st.caption("至少 8 位，需包含大寫、小寫、數字、特殊字符（如 !@#$%）")
         reg_password2 = st.text_input("確認密碼", type="password", key="reg_password2")
         invite_code = st.text_input("邀請碼", key="invite_code")
 
@@ -116,8 +117,16 @@ def auth_page():
                 if response.status_code == 201:
                     st.success("✅ 註冊成功！請使用Email和密碼登入")
                 else:
-                    error = response.json().get("detail", "註冊失敗")
-                    st.error(f"❌ {error}")
+                    detail = response.json().get("detail", "註冊失敗")
+                    # 422 驗證錯誤的 detail 是 list 格式
+                    if isinstance(detail, list):
+                        msgs = []
+                        for err in detail:
+                            msg = err.get("msg", "") if isinstance(err, dict) else str(err)
+                            msgs.append(msg)
+                        st.error("❌ " + "；".join(msgs))
+                    else:
+                        st.error(f"❌ {detail}")
             except Exception as e:
                 st.error(f"❌ 連接失敗：{str(e)}")
 
