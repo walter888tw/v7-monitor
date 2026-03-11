@@ -81,9 +81,9 @@ def auth_page():
         st.markdown("#### 新用戶註冊")
 
         reg_email = st.text_input("Email", key="reg_email")
-        reg_username = st.text_input("用戶名（字母、數字、底線）", key="reg_username")
+        reg_username = st.text_input("用戶名（中文、英文、數字皆可）", key="reg_username")
         reg_password = st.text_input("密碼", type="password", key="reg_password")
-        st.caption("至少 8 位，需包含大寫、小寫、數字、特殊字符（如 !@#$%）")
+        st.caption("至少 8 位，需包含大寫英文、小寫英文、數字")
         reg_password2 = st.text_input("確認密碼", type="password", key="reg_password2")
         invite_code = st.text_input("邀請碼", key="invite_code")
 
